@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""agent-menu: a tmux sidebar that shows every Claude and Codex agent on this machine, who spawned
+whom, and who is waiting for you. Click a row or press Enter for the detail popup.
+Refreshing reads local state only and spends no tokens. See ../README.md, "Agent menu"."""
+import argparse
+import curses
+import locale
+import os
+import shlex
+import sys
+import threading
+
+BIN = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(BIN), "lib"))
+import agent_state  # noqa: E402
+import menu_curses  # noqa: E402
+import menu_render  # noqa: E402
+import menu_style  # noqa: E402
+from sources import tmux_src  # noqa: E402
+from sources.base import SourceError  # noqa: E402
+
+REFRESH_SECONDS = 2.0
+TICK_MS = 150
+ACTIONS = {curses.KEY_DOWN: "down", ord("j"): "down", curses.KEY_UP: "up", ord("k"): "up",
+           curses.KEY_RIGHT: "right", ord("l"): "right", curses.KEY_LEFT: "left", ord("h"): "left",
+           curses.KEY_HOME: "home", ord("g"): "home", curses.KEY_END: "end", ord("G"): "end", ord(" "): "toggle"}
+
+
+class Poller(threading.Thread):
+    """Collects off the draw path, so a slow source never freezes the keys. It never touches curses."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.snapshot, self.failure, self.wake = None, "", threading.Event()
+
+    def run(self):
+        while True:
+            try:
+                self.snapshot, self.failure = agent_state.collect(), ""
+            except Exception as exc:  # the sidebar must outlive any one bad refresh
+                self.failure = f"refresh failed: {type(exc).__name__}"
+            self.wake.wait(REFRESH_SECONDS)
+            self.wake.clear()
+
+
+def open_detail(agent):
+    command = " ".join(shlex.quote(part) for part in
+                       (sys.executable, os.path.join(BIN, "agent-menu-detail"), agent.key))
+    try:
+        tmux_src.popup(command, title=f" {agent.name} ")
+    except SourceError as exc:
+        return str(exc)
+    return ""
+
+
+def show_help(screen):
+    screen.erase()
+    for y, line in enumerate(menu_render.HELP[:curses.LINES - 1]):
+        menu_curses.put(screen, y, 1, menu_render.fit(line, curses.COLS - 2), curses.A_BOLD if y == 0 else 0)
+    screen.noutrefresh()
+    curses.doupdate()
+    screen.timeout(-1)
+    screen.getch()
+    screen.timeout(TICK_MS)
+
+
+def run(screen):
+    curses.curs_set(0)
+    colour = menu_curses.setup(screen)
+    glyphs = menu_style.glyphs()
+    moving = menu_style.animate()
+    screen.timeout(TICK_MS)
+    poller = Poller()
+    poller.start()
+    selected, collapsed, note, frame = "", set(), "", 0
+    while True:
+        height, columns = screen.getmaxyx()
+        columns -= 1  # never write the last column: some terminals wrap there
+        snapshot = poller.snapshot
+        frame += 1 if moving else 0
+        screen.erase()
+        if menu_render.too_small(height, columns):
+            menu_curses.put(screen, 0, 0, menu_render.fit("too small", max(columns, 1)))
+            rendered = []
+        elif not snapshot:
+            rendered = []
+            menu_curses.put(screen, 0, 0, " AGENTS  loading", curses.A_BOLD)
+        else:
+            selected, collapsed = menu_render.move(snapshot, collapsed, selected, "stay")
+            rendered = menu_render.rows(snapshot, columns, collapsed, glyphs, frame // 2)
+            cursor_row = 0
+            for y, row in enumerate(rendered[:height - 1]):
+                attr = {"header": curses.A_BOLD, "retired": curses.A_DIM}.get(row["style"], 0)
+                if row["style"] == "error":
+                    attr = menu_curses.look("auth", colour)
+                chosen = row["key"] and row["key"] == selected
+                if chosen:
+                    attr, cursor_row = attr | curses.A_REVERSE, y
+                menu_curses.put(screen, y, 0, row["text"].ljust(columns) if chosen else row["text"], attr)
+                if row["mark"] and not chosen and row["style"] == "row":
+                    start = menu_render.width(row["text"]) - menu_render.width(row["mark"])
+                    menu_curses.put(screen, y, start, row["mark"], menu_curses.look(row["look"], colour))
+            menu_curses.put(screen, height - 1, 0, menu_render.footer(columns, note or poller.failure), curses.A_DIM)
+            screen.move(cursor_row, 0)  # keep the cursor on the selection: screen readers follow it
+        screen.noutrefresh()
+        curses.doupdate()
+
+        pressed = screen.getch()
+        if pressed == -1:
+            continue
+        note = ""
+        if pressed == curses.KEY_RESIZE:
+            curses.update_lines_cols()
+            continue
+        if pressed in (ord("q"), ord("Q")):
+            return
+        if pressed == ord("?"):
+            show_help(screen)
+            continue
+        if not snapshot:
+            continue
+        target = ""
+        if pressed in ACTIONS:
+            selected, collapsed = menu_render.move(snapshot, collapsed, selected, ACTIONS[pressed])
+        elif pressed in (curses.KEY_ENTER, 10, 13):
+            target = selected
+        elif pressed == curses.KEY_MOUSE:
+            try:
+                _, x, y, _, _ = curses.getmouse()
+            except curses.error:
+                continue
+            key = menu_render.key_at(rendered, y)
+            if not key:
+                continue
+            selected = key
+            if x <= 3 and snapshot.by_key[key].children:
+                selected, collapsed = menu_render.move(snapshot, collapsed, key, "toggle")
+            else:
+                target = key
+        if target in snapshot.by_key:
+            note = open_detail(snapshot.by_key[target])
+            poller.wake.set()
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(prog="agent-menu", description=__doc__.split("\n")[0])
+    parser.add_argument("--once", action="store_true", help="print the tree once as plain text and exit")
+    parser.add_argument("--columns", type=int, default=34, help="with --once: width to render (default 34)")
+    args = parser.parse_args(argv)
+    locale.setlocale(locale.LC_ALL, "")
+    if args.once:
+        for row in menu_render.rows(agent_state.collect(), args.columns, glyphs=menu_style.glyphs()):
+            print(row["text"])
+        return 0
+    curses.wrapper(run)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
