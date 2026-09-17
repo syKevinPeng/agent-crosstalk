@@ -2,11 +2,10 @@
 import dataclasses
 import datetime
 import re
-import unicodedata
 
 import auth_readers
 from sources import claude_src, codex_src, logs_src, tmux_src
-from sources.base import SourceError
+from sources.base import SourceError, clean
 
 RETIRED_VISIBLE = datetime.timedelta(minutes=10)
 
@@ -41,18 +40,19 @@ class Snapshot:
     errors: list                  # e.g. ["codex: unreachable"]
 
 
-def clean(name):
-    """A session name is chosen by the agent, so it is untrusted text. Control characters, escape
-    sequences, newlines and tabs become `?` before the name reaches a screen, stdout or a log."""
-    return "".join(ch if ch.isprintable() and unicodedata.category(ch) != "Cf" else "?" for ch in name or "")
-
-
-def title_name(kind, title):
-    """The session name a CLI puts in its pane title. Claude: `<status glyph> <name>`.
-    Codex: `[<status> |] <glyph> <name> | <project>`, so the name is the segment before the last."""
+def title_names(kind, title):
+    """Every name a pane title could be showing. Claude: the whole title. Codex: `<name> | <project>`,
+    perhaps with a status segment in front, and a name may itself contain `|`, so every run of
+    segments that ends before the project counts. Each reading is also tried without a leading status
+    glyph, because the CLIs put a spinner there while busy. Returning all readings, not one guess,
+    lets the two-claimants rule settle any doubt: a pane that fits two agents goes to neither."""
     parts = [part.strip() for part in title.split("|")]
-    segment = parts[-2] if kind == "codex" and len(parts) >= 2 else parts[0] if kind == "codex" else title.strip()
-    return re.sub(r"^[^\w\s]{1,2}\s+", "", segment)   # drop a leading spinner or status glyph
+    if kind == "codex" and len(parts) >= 2:
+        segments = {" | ".join(parts[i:-1]) for i in range(len(parts) - 1)}
+    else:
+        segments = {title.strip()}
+    names = set(segments) | {re.sub(r"^[^\w\s]{1,2}\s+", "", segment) for segment in segments}
+    return {clean(name) for name in names if name}
 
 
 def _match_panes(agents, panes):
@@ -63,14 +63,15 @@ def _match_panes(agents, panes):
     for agent in agents:
         if agent.state == "stopped":
             continue  # a thread that is not running cannot be what a live pane shows
-        fits = []
+        by_pid, by_title = [], []
         for pane in panes:
             if pane["command"] != agent.kind:
                 continue
-            by_pid = agent.kind == "claude" and agent._pid in trees[pane["pane_id"]]
-            by_title = clean(title_name(agent.kind, pane["title"])) == agent.name
-            if by_pid or by_title:
-                fits.append(pane)
+            if agent.kind == "claude" and agent._pid in trees[pane["pane_id"]]:
+                by_pid.append(pane)
+            if agent.name in title_names(agent.kind, pane["title"]):
+                by_title.append(pane)
+        fits = by_pid if len(by_pid) == 1 else by_title   # a process id is certain, a title is a reading
         if len(fits) == 1:
             claims.setdefault(fits[0]["pane_id"], []).append((agent, fits[0]))
     for claimants in claims.values():
@@ -132,7 +133,7 @@ def collect(now=None):
 
     agents = []
     for entry in raw:
-        agent = Agent(key=f"{entry['kind']}:{entry['session_id']}", kind=entry["kind"], name=clean(entry["name"]),
+        agent = Agent(key=f"{entry['kind']}:{entry['session_id']}", kind=entry["kind"], name=entry["name"],
                       session_id=entry["session_id"], short_id=entry.get("short_id") or "",
                       cwd=entry.get("cwd") or "", state=entry["state"], background=entry.get("background", False))
         agent._pid, agent._title = entry.get("pid"), ""
@@ -185,3 +186,12 @@ def collect(now=None):
         agent.children.sort(key=urgency)
     roots.sort(key=urgency)
     return Snapshot(roots=roots, by_key=by_key, errors=errors)
+
+
+def safe_collect():
+    """collect(), or a snapshot that says the refresh failed. The menu must never keep showing the
+    last good tree as if it were current, and one bad refresh must not end the sidebar."""
+    try:
+        return collect()
+    except Exception as exc:
+        return Snapshot(roots=[], by_key={}, errors=[f"refresh failed: {type(exc).__name__}"])

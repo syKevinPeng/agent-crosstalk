@@ -13,6 +13,7 @@ import re
 import shlex
 import subprocess
 
+import agent_state
 import auth_readers
 from sources import tmux_src
 from sources.base import SourceError
@@ -68,6 +69,9 @@ def _same_pane(agent):
         raise Refused("that pane is gone")
     if now["pid"] != agent.pane_pid or now["command"] != agent.kind:
         raise Refused("that pane now runs something else")
+    if agent.name not in agent_state.title_names(agent.kind, now["title"]):
+        # Same shell, same CLI, but the title names another session: the owner quit one and started another.
+        raise Refused("that pane now shows a different session")
 
 
 def instruct(agent, text):
@@ -157,3 +161,20 @@ def retire(agent):
         raise Refused(done.stderr.strip().splitlines()[-1] if done.stderr.strip() else "retire-peer failed")
     _result(agent, "retire", "retired")
     return "retired"
+
+
+def perform(agent, button, text=""):
+    """Run one popup button. Returns (note for the owner, succeeded?, close the popup?).
+    Nothing that goes wrong here may crash the popup: the owner is told instead."""
+    actions = {"Open pane": (open_pane, True), "Attach": (attach, True), "Retire": (retire, False)}
+    try:
+        if button == "Send":
+            return instruct(agent, text), True, False
+        if button in actions:
+            action, close = actions[button]
+            return action(agent), True, close
+    except Refused as refusal:
+        return f"not done: {refusal}", False, False
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"not done: {type(exc).__name__}", False, False
+    return "", False, False

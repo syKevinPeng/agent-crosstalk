@@ -19,8 +19,8 @@ MAX_INDENT = 4
 
 def width(text):
     """Screen cells. A combining mark sits on the character before it and takes none."""
-    return sum(0 if unicodedata.combining(ch) else 2 if unicodedata.east_asian_width(ch) in "WF" else 1
-               for ch in text)
+    return sum(0 if unicodedata.combining(ch) or unicodedata.category(ch) in ("Mn", "Me", "Cf")
+               else 2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
 
 
 def fit(text, columns, ellipsis="…"):
@@ -115,7 +115,8 @@ def rows(snapshot, columns, collapsed=(), glyphs=None, frame=0):
         if depth == 0:
             add(agent, " ", (glyphs["closed"] if folded else glyphs["open"]) if agent.children else glyphs["leaf"])
         else:
-            add(agent, " " + "  " * min(depth, MAX_INDENT), glyphs["last"] if last else glyphs["branch"])
+            levels = min(depth, MAX_INDENT, max((columns - 22) // 2, 0))   # a narrow pane indents less
+            add(agent, " " + "  " * levels, glyphs["last"] if last else glyphs["branch"])
         if not folded:
             for index, child in enumerate(agent.children):
                 walk(child, depth + 1, index == len(agent.children) - 1)

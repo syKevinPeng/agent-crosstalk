@@ -31,16 +31,11 @@ class Poller(threading.Thread):
 
     def __init__(self):
         super().__init__(daemon=True)
-        self.snapshot, self.failure, self.wake = None, "", threading.Event()
+        self.snapshot, self.wake = None, threading.Event()
 
     def run(self):
         while True:
-            try:
-                self.snapshot, self.failure = agent_state.collect(), ""
-            except Exception as exc:  # the sidebar must outlive any one bad refresh
-                # Never keep showing the last good tree: that would be stale marks presented as current.
-                self.failure = f"refresh failed: {type(exc).__name__}"
-                self.snapshot = agent_state.Snapshot(roots=[], by_key={}, errors=[self.failure])
+            self.snapshot = agent_state.safe_collect()
             self.wake.wait(REFRESH_SECONDS)
             self.wake.clear()
 

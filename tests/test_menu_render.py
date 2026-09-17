@@ -21,8 +21,15 @@ class AuthReadersTest(unittest.TestCase):
             "(current) UNIX password: ": "password",
             "Vault password: ": "password",
             "Username for 'https://host.example': ": "username",
-            "Enter PIN: ": "credential", "passphrase: ": "credential", "Enter your OTP: ": "credential",
-            "Token: ": "credential", "Passcode: ": "credential", "Enter MFA code": "credential",
+            "Enter PIN: ": "credential", "passphrase: ": "password", "Enter your OTP: ": "credential",
+            "Token: ": "credential", "Passcode: ": "credential", "Enter MFA code": "second factor",
+            "(someone@cluster) Password: ": "password", "Enter your password: ": "password",
+            "Password (again): ": "password", "Retype new password: ": "password",
+            "BECOME password: ": "password", "SSH password: ": "password",
+            "[sudo] Passwort für someone: ": "password", "Bad passphrase, try again for /k/id: ": "password",
+            "2FA code: ": "second factor", "Authentication code: ": "second factor",
+            "Enter the 6-digit code from your app": "second factor",
+            "Then enter the code:": "browser sign-in", "Open the following URL in a browser:": "browser sign-in",
             "Duo two-factor login for someone": "second factor",
             "Passcode or option (1-3): ": "second factor",
             "Verification code: ": "second factor",
@@ -186,6 +193,17 @@ class RenderTest(unittest.TestCase):
         for row in looped:
             self.assertLessEqual(menu_render.width(row["text"]), 40)
 
+    def test_a_deep_tree_still_fits_a_narrow_pane(self):
+        agent = self.agent("level0")
+        root = agent
+        for depth in range(1, 9):
+            child = self.agent(f"level{depth}", access="ro")
+            agent.children.append(child)
+            agent = child
+        for columns in (20, 24, 27, 34):
+            for row in menu_render.rows(self.snap(root), columns):
+                self.assertLessEqual(menu_render.width(row["text"]), columns, (columns, row["text"]))
+
     def test_the_selected_row_is_always_on_screen(self):
         agents = [self.agent(f"agent{i:03}") for i in range(200)]
         rendered = menu_render.rows(self.snap(*agents, errors=["codex: unreachable"]), 34)
@@ -200,6 +218,7 @@ class RenderTest(unittest.TestCase):
 
     def test_a_combining_mark_takes_no_cell_so_the_mark_is_not_drawn_twice(self):
         self.assertEqual(menu_render.width("e\u0301"), 1)
+        self.assertEqual(menu_render.width("a\ufe0fb\u200d"), 2)       # a variation selector and a joiner take no cell
         row = menu_render.rows(self.snap(self.agent("cafe\u0301 session", state="idle")), 34)[1]
         self.assertEqual(menu_render.width(row["text"]), 33)
         self.assertEqual(row["text"].count("✓"), 1)

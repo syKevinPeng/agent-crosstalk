@@ -1,19 +1,22 @@
-"""Tests for the popup's key handling, which is a pure state machine."""
+"""Tests for the popup's key handling, which is a pure state machine with a clock passed in."""
 import sys
 import unittest
 
 from menu_fixtures import LIB
 
 sys.path.insert(0, str(LIB))
-from menu_popup import State, after_action, step  # noqa: E402
+from menu_popup import SETTLE, State, after_action, step  # noqa: E402
 
 ALL = ["Open pane", "Send", "Retire"]
+HUMAN, PASTE = 1.0, 0.001          # seconds between events: a person, and a paste
 
 
-def play(state, offered, events):
-    actions = []
+def play(offered, events, gap=HUMAN, state=None, start=100.0):
+    """Feed events `gap` seconds apart. An event may be (kind, value) or (kind, value, own_gap)."""
+    state, now, actions = state or State(), start, []
     for event in events:
-        state, action = step(state, offered, event)
+        now += event[2] if len(event) == 3 else gap
+        state, action = step(state, offered, event[:2], now=now)
         if action:
             actions.append(action)
     return state, actions
@@ -24,60 +27,83 @@ def chars(text):
 
 
 class PopupTest(unittest.TestCase):
-    def test_retire_needs_the_same_choice_twice_and_any_other_key_cancels(self):
-        self.assertEqual(play(State(), ALL, chars("r"))[1], [])
-        self.assertEqual(play(State(), ALL, chars("rr"))[1], ["Retire"])
-        self.assertEqual(play(State(), ALL, chars("rxr"))[1], [])                     # x cancelled the first r
-        self.assertEqual(play(State(), ALL, [("char", "r"), ("key", "enter")])[1], ["Retire"])
-        self.assertEqual(play(State(), ALL, [("click", "Retire"), ("click", "Retire")])[1], ["Retire"])
-        self.assertEqual(play(State(), ALL, [("click", "Retire"), ("click", "Open pane")])[1], ["Open pane"])
-        state, actions = play(State(), ALL, [("char", "r"), ("key", "esc")])
-        self.assertEqual((actions, state.close, state.confirm), ([], False, ""))       # Esc cancels, does not close
+    def test_retire_is_armed_by_r_and_confirmed_only_by_y_or_enter(self):
+        self.assertEqual(play(ALL, chars("r"))[1], [])
+        self.assertEqual(play(ALL, chars("ry"))[1], ["Retire"])
+        self.assertEqual(play(ALL, chars("r") + [("key", "enter")])[1], ["Retire"])
+        self.assertEqual(play(ALL, chars("rr"))[1], [])                    # the arming key again is not a confirm
+        self.assertEqual(play(ALL, chars("rrrry"))[1], ["Retire"])         # still armed, then a real confirm
+        self.assertEqual(play(ALL, chars("rxy"))[1], [])                   # x cancelled, so y confirms nothing
+        self.assertEqual(play(ALL, [("click", "Retire"), ("click", "Retire")])[1], ["Retire"])
+        self.assertEqual(play(ALL, [("click", "Retire"), ("click", "Open pane")])[1], ["Open pane"])
+        state, actions = play(ALL, chars("r") + [("key", "esc")])
+        self.assertEqual((actions, state.close, state.confirm), ([], False, ""))   # Esc cancels, does not close
 
-    def test_other_buttons_act_at_once(self):
-        self.assertEqual(play(State(), ALL, chars("o"))[1], ["Open pane"])
-        self.assertEqual(play(State(), ["Attach"], chars("t"))[1], ["Attach"])
-        self.assertEqual(play(State(), ALL, chars("t"))[1], [])                        # not offered, so not possible
+    def test_a_confirm_that_comes_too_soon_does_not_count(self):
+        quick = SETTLE / 2
+        self.assertEqual(play(ALL, [("char", "r"), ("char", "y", quick)])[1], [])
+        self.assertEqual(play(ALL, [("char", "r"), ("key", "enter", quick)])[1], [])
+        self.assertEqual(play(ALL, [("click", "Retire"), ("click", "Retire", quick)])[1], [])
+        state, actions = play(ALL, [("char", "r"), ("char", "y", quick), ("char", "y", SETTLE)])
+        self.assertEqual(actions, ["Retire"])                              # stayed armed; a later confirm counts
 
-    def test_while_typing_letters_are_text_never_hotkeys(self):
-        state, actions = play(State(), ALL, chars("i") + chars("rr open retire q"))
-        self.assertEqual(actions, [])
-        self.assertEqual(state.text, "rr open retire q")
+    def test_pasted_text_outside_the_instruction_line_never_retires(self):
+        for text in ("see the error above", "current", "clear\nnext", "rry", "ry\n", "r\ny", "arry carry",
+                     "retire it\n\n", "rrrrrryyyy\n"):
+            with self.subTest(text=text):
+                self.assertNotIn("Retire", play(ALL, chars(text), gap=PASTE)[1])
+        # Tab Tab Enter Enter as one burst must not do it either.
+        burst = [("key", "tab"), ("key", "tab"), ("key", "enter"), ("key", "enter")]
+        self.assertNotIn("Retire", play(ALL, burst, gap=PASTE)[1])
+        # Nor a paste that begins slowly: r typed by hand, then a paste that happens to hold y.
+        self.assertNotIn("Retire", play(ALL, [("char", "r")] + [(k, v, PASTE) for k, v in chars("yes please\n")])[1])
+
+    def test_a_paste_fires_at_most_its_first_key(self):
+        state, actions = play(ALL, chars("see the error above, open it"), gap=PASTE)
+        self.assertEqual(actions, [])                                      # `s` is no hotkey, the rest is a burst
+        self.assertEqual(play(ALL, chars("open"), gap=PASTE)[1], ["Open pane"])   # the one key a person could also press
         self.assertFalse(state.close)
 
-    def test_a_pasted_second_line_cannot_retire_or_open(self):
-        state, actions = play(State(), ALL, chars("i") + chars("first line\n"))
+    def test_other_buttons_act_at_once(self):
+        self.assertEqual(play(ALL, chars("o"))[1], ["Open pane"])
+        self.assertEqual(play(["Attach"], chars("t"))[1], ["Attach"])
+        self.assertEqual(play(ALL, chars("t"))[1], [])                     # not offered, so not possible
+
+    def test_while_typing_letters_are_text_never_hotkeys_even_in_a_paste(self):
+        for gap in (HUMAN, PASTE):
+            state, actions = play(ALL, chars("i") + chars("rry open retire q"), gap=gap)
+            self.assertEqual(actions, [])
+            self.assertEqual(state.text, "rry open retire q")
+            self.assertFalse(state.close)
+
+    def test_a_pasted_instruction_sends_its_first_line_and_the_rest_cannot_retire(self):
+        state, actions = play(ALL, chars("i") + [(k, v, PASTE) for k, v in chars("first line\nry second\n")])
         self.assertEqual(actions, ["Send"])
         self.assertEqual(state.text, "first line")
-        # The loop flushes pending input after an action. Even if it did not, one `r` is not enough.
-        state = after_action(state, "Send", succeeded=True)
-        leftovers = play(state, ALL, chars("r second, then retire it r"))[1]
-        self.assertNotIn("Retire", leftovers)      # harmless keys may fire, the risky one cannot
 
     def test_send_needs_text_and_keeps_it_when_refused(self):
-        state, actions = play(State(), ALL, [("key", "tab"), ("key", "enter")])       # focus Send, press it, no text
+        state, actions = play(ALL, [("key", "tab"), ("key", "enter")])     # focus Send, press it, no text
         self.assertEqual((actions, state.typing), ([], True))
-        state, actions = play(State(), ALL, chars("i") + chars("hello\n"))
+        state, actions = play(ALL, chars("i") + chars("hello\n"))
+        self.assertEqual(actions, ["Send"])
         self.assertEqual(after_action(state, "Send", succeeded=False).text, "hello")
         self.assertEqual(after_action(state, "Send", succeeded=True).text, "")
 
     def test_typing_editing_and_leaving(self):
-        state, _ = play(State(), ALL, chars("i") + chars("abc") + [("key", "backspace"), ("key", "backspace")])
+        state, _ = play(ALL, chars("i") + chars("abc") + [("key", "backspace"), ("key", "backspace")])
         self.assertEqual(state.text, "a")
-        state, _ = play(state, ALL, [("key", "backspace"), ("key", "backspace"), ("key", "esc")])
+        state, _ = play(ALL, [("key", "backspace"), ("key", "backspace"), ("key", "esc")], state=state)
         self.assertEqual((state.text, state.typing, state.close), ("", False, False))
-        self.assertTrue(play(state, ALL, [("key", "esc")])[0].close)
-        self.assertTrue(play(State(), ALL, chars("q"))[0].close)
-        self.assertEqual(play(State(), ["Open pane"], chars("i"))[0].typing, False)   # no Send, no typing
+        self.assertTrue(play(ALL, [("key", "esc")], state=state)[0].close)
+        self.assertTrue(play(ALL, chars("q"))[0].close)
+        self.assertEqual(play(["Open pane"], chars("i"))[0].typing, False)  # no Send, no typing
 
     def test_focus_wraps_and_scroll_never_goes_negative(self):
-        state, _ = play(State(), ALL, [("key", "tab")] * 4)
-        self.assertEqual(state.focus, 1)
-        state, _ = play(State(), ALL, [("key", "backtab")])
-        self.assertEqual(state.focus, 2)
-        self.assertEqual(play(State(), ALL, [("key", "pgup")])[0].scroll, 0)
-        self.assertEqual(play(State(), ALL, [("key", "pgdn")])[0].scroll, 10)
-        self.assertEqual(play(State(), [], [("key", "enter"), ("key", "tab"), ("click", "Send")])[1], [])
+        self.assertEqual(play(ALL, [("key", "tab")] * 4)[0].focus, 1)
+        self.assertEqual(play(ALL, [("key", "backtab")])[0].focus, 2)
+        self.assertEqual(play(ALL, [("key", "pgup")])[0].scroll, 0)
+        self.assertEqual(play(ALL, [("key", "pgdn")])[0].scroll, 10)
+        self.assertEqual(play([], [("key", "enter"), ("key", "tab"), ("click", "Send")])[1], [])
 
 
 if __name__ == "__main__":

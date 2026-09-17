@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -102,6 +103,33 @@ class MenuActionsTest(unittest.TestCase):
         self.assertEqual(self.acted(), [])
         self.assertEqual(self.m.actions(), [])
 
+    def test_a_pane_that_now_shows_another_session_gets_no_keys(self):
+        self.m.panes = [(7, 700, "codex", "a different thread | proj")]     # same shell, same CLI, another session
+        self.m.write()
+        with self.assertRaises(menu_actions.Refused):
+            menu_actions.instruct(self.agent, "hello")
+        self.assertEqual(self.acted(), [])
+
+    def test_perform_tells_the_owner_instead_of_crashing(self):
+        self.assertEqual(menu_actions.perform(self.agent, "Open pane"), ("pane focused", True, True))
+        self.assertEqual(menu_actions.perform(self.agent, "Send", "hello")[:2], ("typed into its pane", True))
+        note, ok, close = menu_actions.perform(self.agent, "Retire")
+        self.assertEqual((ok, close), (False, False))
+        self.assertTrue(note.startswith("not done:"))
+        for error in (OSError(28, "No space left"), subprocess.TimeoutExpired("x", 1)):
+            with mock.patch.object(menu_actions, "open_pane", side_effect=error):
+                note, ok, close = menu_actions.perform(self.agent, "Open pane")
+            self.assertEqual((ok, close), (False, False))
+            self.assertIn(type(error).__name__, note)
+        self.assertEqual(menu_actions.perform(self.agent, "No such button"), ("", False, False))
+
+    def test_a_forgotten_stub_can_never_reach_the_real_codex(self):
+        headless = agent_state.Agent(key="codex:t2", kind="codex", name="quiet", session_id="t2")
+        with self.assertRaises(menu_actions.Refused):
+            menu_actions.instruct(headless, "hello")                        # the fixture's codex stub fails
+        self.assertEqual((self.m.dir / "codex-calls.txt").read_text().strip(), "queue --thread t2 --message hello")
+        self.assertIn("codex-stub", os.environ["CODEX_BIN"])
+
     def test_an_instruction_is_one_line_of_plain_text(self):
         for text in ("first\nsecond", "tab\there", "esc\x1b[2J", "bell\x07"):
             with self.subTest(text=text):
@@ -178,13 +206,57 @@ class RealTmuxFormatTest(unittest.TestCase):
         self.socket = f"agentmenu-test-{os.getpid()}"
         self.tmux = ["tmux", "-L", self.socket, "-f", "/dev/null"]
         subprocess.run(self.tmux + ["new-session", "-d", "-s", "t", "-x", "80", "-y", "24", "sleep 60"], check=True)
-        self.addCleanup(lambda: subprocess.run(self.tmux + ["kill-server"], capture_output=True))
+        self.addCleanup(self.stop_server)
         wrapper = Path(self._tmp.name) / "tmux-private"
         wrapper.write_text(f"#!/usr/bin/env bash\nexec tmux -L {self.socket} -f /dev/null \"$@\"\n")
         wrapper.chmod(0o755)
         patcher = mock.patch.dict(os.environ, {"TMUX_BIN": str(wrapper)})
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def stop_server(self):
+        path = subprocess.run(self.tmux + ["display-message", "-p", "#{socket_path}"],
+                              capture_output=True, text=True).stdout.strip()
+        subprocess.run(self.tmux + ["kill-server"], capture_output=True)
+        if path and os.path.basename(path) == self.socket:
+            try:
+                os.unlink(path)                       # tmux leaves the socket file behind
+            except OSError:
+                pass
+
+    def attach_client(self):
+        """display-popup needs an attached client. A pty gives it one."""
+        import pty
+        import threading
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.environ["TERM"] = "xterm-256color"
+            os.execvp("tmux", self.tmux + ["attach", "-t", "t"])
+
+        def drain():
+            while True:
+                try:
+                    if not os.read(fd, 65536):
+                        return
+                except OSError:
+                    return
+        threading.Thread(target=drain, daemon=True).start()
+        self.addCleanup(lambda: os.close(fd))
+        for _ in range(40):
+            if subprocess.run(self.tmux + ["list-clients"], capture_output=True, text=True).stdout.strip():
+                return
+            time.sleep(0.1)
+        self.skipTest("could not attach a client to the private tmux server")
+
+    def test_a_hostile_popup_title_runs_nothing(self):
+        self.attach_client()
+        marker, control = Path(self._tmp.name) / "pwned-title", Path(self._tmp.name) / "control"
+        tmux_src.popup("sleep 0.3", title=f"#(touch {marker}) #{{pane_pid}};")
+        # The control proves this setup would have caught it: the same title, unescaped, does run.
+        tmux_src._tmux("display-popup", "-E", "-T", f"#(touch {control})", "sleep 0.3", timeout=None)
+        time.sleep(1.2)
+        self.assertTrue(control.exists(), "the control did not run, so this test proves nothing")
+        self.assertFalse(marker.exists(), "the popup title ran a shell command")
 
     def test_a_hostile_name_is_shown_as_text_and_runs_nothing(self):
         marker = Path(self._tmp.name) / "pwned"
@@ -194,7 +266,6 @@ class RealTmuxFormatTest(unittest.TestCase):
                                capture_output=True, text=True).stdout
         self.assertIn("#(touch", names)                  # kept as literal text
         self.assertIn("#{pane_pid}", names)              # not expanded to a number
-        import time
         time.sleep(1.2)                                  # a #() job would have run by now
         self.assertFalse(marker.exists(), "the window name ran a shell command")
         self.assertEqual(tmux_src.literal("a#b;"), "a##b\;")

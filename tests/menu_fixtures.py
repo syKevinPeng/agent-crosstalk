@@ -25,6 +25,13 @@ case $1 in
 esac
 """
 
+# Every external program the menu can run has a stub here. A test that forgets to set one must hit
+# a stub that fails, never the real binary: a real `codex queue` would message a live session.
+CODEX_STUB = r"""#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_DIR/codex-calls.txt"
+exit "${STUB_CODEX_EXIT:-1}"
+"""
+
 CLAUDE_STUB = r"""#!/usr/bin/env bash
 [[ -n ${STUB_CLAUDE_FAIL:-} ]] && exit 7
 [[ $1 == agents ]] && cat "$STUB_DIR/claude.json"
@@ -49,6 +56,7 @@ class Machine:
         self.env = dict(os.environ, STUB_DIR=str(self.dir), CODEX_APP_SERVER_SOCK=self.sock,
                         TMUX_BIN=str(executable(self.dir / "tmux-stub", TMUX_STUB)),
                         CLAUDE_BIN=str(executable(self.dir / "claude-stub", CLAUDE_STUB)),
+                        CODEX_BIN=str(executable(self.dir / "codex-stub", CODEX_STUB)),
                         AGENT_MENU_PROC_ROOT=str(self.proc),
                         AGENT_COMMS_LOG=str(self.dir / "messages.jsonl"),
                         AGENT_COMMS_SPAWN_LOG=str(self.dir / "spawned.jsonl"),

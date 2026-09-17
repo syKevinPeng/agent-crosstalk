@@ -5,7 +5,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from codex_ws import CodexError, CodexWS  # noqa: E402
 
-from .base import SourceError  # noqa: E402
+from .base import SourceError, clean  # noqa: E402
 
 STATES = {"active": "working", "idle": "idle", "notLoaded": "stopped"}
 
@@ -13,8 +13,9 @@ STATES = {"active": "working", "idle": "idle", "notLoaded": "stopped"}
 def _thread(raw):
     status = raw.get("status")
     status = status.get("type") if isinstance(status, dict) else status
+    name = clean(raw.get("name")).strip() or raw["id"][:8]                        # never a blank row
     return {"kind": "codex", "session_id": raw["id"], "short_id": raw["id"][:8],
-            "name": raw.get("name") or raw["id"][:8], "cwd": raw.get("cwd"), "pid": None,
+            "name": name, "cwd": clean(raw.get("cwd")), "pid": None,
             "state": STATES.get(status, "unknown"), "background": False}
 
 
@@ -27,7 +28,7 @@ def list_threads(extra_ids=(), timeout=1.5):
         raise SourceError(f"codex: {exc}") from None
     try:
         listing = ws.rpc("thread/list", {"limit": 200}).get("data", [])
-        threads = {t["id"]: _thread(t) for t in listing if isinstance(t, dict) and t.get("id")}
+        threads = {t["id"]: _thread(t) for t in listing if isinstance(t, dict) and isinstance(t.get("id"), str)}
         for thread_id in extra_ids:
             if thread_id in threads:
                 continue
@@ -35,7 +36,7 @@ def list_threads(extra_ids=(), timeout=1.5):
                 raw = ws.rpc("thread/read", {"threadId": thread_id}).get("thread")
             except CodexError:
                 continue  # archived, deleted or never loaded: not an error for the whole source
-            if isinstance(raw, dict) and raw.get("id"):
+            if isinstance(raw, dict) and isinstance(raw.get("id"), str):
                 threads[raw["id"]] = _thread(raw)
     except CodexError as exc:
         raise SourceError(f"codex: {exc}") from None

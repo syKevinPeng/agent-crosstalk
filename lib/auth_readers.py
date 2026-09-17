@@ -12,6 +12,10 @@ SCREEN_PATTERNS = [
     ("ssh key passphrase", r"Enter passphrase for key"),
     ("sudo password", r"\[sudo\] password for \S+:\s*$"),
     ("password", r"(?i)^(\S+@\S+'s |\(current\) unix |vault |new )?password( for .{1,80})?:\s*$"),
+    # `(user@host) Password:`, `Enter your password:`, `Password (again):`, `BECOME password:`, other languages.
+    ("password", r"(?i)^(\(\S+@\S+\)\s*)?(\S+ ){0,4}(password|passwort|mot de passe|contraseña|passphrase)\b[^:]{0,60}:\s*$"),
+    ("second factor", r"(?i)^(\S+ ){0,3}(2fa|mfa|otp|authentication|verification|security|6-digit)\s+code\b.{0,80}:?\s*$"),
+    ("browser sign-in", r"(?i)^(then )?enter the code:?\s*$|^open the following url"),
     ("username", r"(?i)^username for .{1,80}:\s*$"),
     ("credential", r"(?i)^(enter )?(your |the )?(passphrase|passcode|pin|otp|token|mfa code|security code)"
                    r"( for [^:]{1,40})?:?\s*$"),

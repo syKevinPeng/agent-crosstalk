@@ -3,7 +3,7 @@ import datetime
 import os
 import re
 
-from .base import read_jsonl
+from .base import clean, read_jsonl
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
@@ -43,8 +43,8 @@ def spawned():
         if not agent_id:
             continue
         if record.get("event") == "spawned":
-            agents[agent_id] = {"id": agent_id, "kind": record.get("kind"), "name": record.get("name"),
-                                "cwd": record.get("cwd"), "spawned_by": record.get("spawned_by") or "",
+            agents[agent_id] = {"id": agent_id, "kind": record.get("kind"), "name": clean(record.get("name")),
+                                "cwd": clean(record.get("cwd")), "spawned_by": record.get("spawned_by") or "",
                                 "access": "rw" if record.get("access") == "write" else "ro",
                                 "retired_at": None}
         elif record.get("event") == "retired" and agent_id in agents:
@@ -85,5 +85,5 @@ def recent(agent_id, agent_name, limit=4):
         from_it = bool(wanted) and normalise(record.get("sender")) == wanted
         if to_it or from_it:
             rows.append({"direction": "→" if to_it else "←", "time": (record.get("time_utc") or "")[11:16],
-                         "text": record.get("first_line") or "", "receipt": record["msg_id"] in received})
+                         "text": clean(record.get("first_line")), "receipt": record["msg_id"] in received})
     return rows[-limit:]

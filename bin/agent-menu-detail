@@ -8,6 +8,7 @@ import locale
 import os
 import subprocess
 import sys
+import time
 
 BIN = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(BIN), "lib"))
@@ -29,7 +30,7 @@ CHAR_KEYS = {"\x1b": "esc", "\n": "enter", "\r": "enter", "\t": "tab", "\x7f": "
 
 
 def load(key):
-    snapshot = agent_state.collect()
+    snapshot = agent_state.safe_collect()
     agent = snapshot.by_key.get(key)
     if not agent:
         return None, "", [], ""
@@ -42,31 +43,13 @@ def load(key):
     if agent.kind == "codex" and not agent.pane_id:
         try:
             done = subprocess.run([sys.executable, os.path.join(BIN, "codex-reply"), agent.session_id],
-                                  capture_output=True, text=True, timeout=20)
+                                  capture_output=True, text=True, timeout=5)
             reply = "\n".join(done.stdout.splitlines()[1:]).strip() if done.returncode in (0, 5) else ""
         except (OSError, subprocess.TimeoutExpired):
             reply = ""
-        reply = agent_state.clean(reply.replace("\t", " ")).replace("?\n", "\n") if reply else ""
+        reply = "\n".join(agent_state.clean(line.replace("\t", " ")) for line in reply.splitlines())
         agent.auth = agent.auth or (auth_readers.detect_output(reply) or "")
     return agent, (parent.name if parent else ""), recent, reply
-
-
-def act(agent, button, text):
-    """Returns (note for the owner, succeeded?, close the popup?)."""
-    try:
-        if button == "Open pane":
-            return menu_actions.open_pane(agent), True, True
-        if button == "Attach":
-            return menu_actions.attach(agent), True, True
-        if button == "Retire":
-            return menu_actions.retire(agent), True, False
-        if button == "Send":
-            return menu_actions.instruct(agent, text), True, False
-    except menu_actions.Refused as refusal:
-        return f"not done: {refusal}", False, False
-    except OSError as exc:
-        return f"not done: {type(exc).__name__}", False, False
-    return "", False, False
 
 
 def read_event(screen):
@@ -138,7 +121,7 @@ def run(screen, key):
                 if not state.typing and not state.text:
                     menu_curses.put(screen, height - 5, 4, "press i to type an instruction", curses.A_DIM)
             if state.confirm:
-                hint = f"press r or Enter again to {state.confirm.lower()} this agent · any other key cancels"
+                hint = f"{state.confirm} this agent? press y or Enter to confirm · any other key cancels"
             elif state.typing:
                 hint = "Enter send · Esc stop typing"
             else:
@@ -167,10 +150,13 @@ def run(screen, key):
             else:
                 continue
         note = ""
-        state, chosen = menu_popup.step(state, offered, event, page=max(height - 7, 1))
+        was_armed = state.confirm
+        state, chosen = menu_popup.step(state, offered, event, page=max(height - 7, 1), now=time.monotonic())
+        if state.confirm and not was_armed:
+            curses.flushinp()                               # whatever was pasted along with the arming key is dropped
         if not chosen:
             continue
-        note, succeeded, close = act(agent, chosen, state.text)
+        note, succeeded, close = menu_actions.perform(agent, chosen, state.text)
         state = menu_popup.after_action(state, chosen, succeeded)
         curses.flushinp()                                   # the rest of a paste must not run as hotkeys
         if close:
