@@ -1,19 +1,29 @@
 """Turn a Snapshot into sidebar rows. Pure functions: no curses, no I/O."""
+import os
+import time
 import unicodedata
 
 import menu_style
 
 MIN_COLUMNS, MIN_ROWS = 20, 5
-HINT_FULL = " ⏎ open  ←→ fold  ? help  q quit"
-HINT_SHORT = " ⏎ open  ? help"
-HINT_ASCII = " Enter open  ? help  q quit"
+# How wide the pane must be for each layout. Narrow drops the kind and access columns; wide adds
+# the working folder and the model. `w` resizes the pane between STRIP_WIDTH and PANEL_WIDTH.
+NORMAL_COLUMNS, WIDE_COLUMNS = 26, 48
+STRIP_WIDTH, PANEL_WIDTH = 20, 62
+FOLDER_COLUMNS, MODEL_COLUMNS = 16, 11
+LOUD_PERCENT = 90        # at or above this a limit bar turns red, reusing the "needs you" colour
+LIMITS_MIN_COLUMNS = 26  # narrower than this the block cannot say anything useful, so the tree keeps the space
+STALE_SECONDS = 45 * 60  # a reading older than this is marked, never quietly shown as current
+HINT_FULL = " ⏎ open  ←→ fold  w wide  u limits  ? help"
+HINT_SHORT = " ⏎ open  u limits  ? help"
+HINT_ASCII = " Enter open  u limits  ? help"
 # Every help line fits the narrowest sidebar (32 cells) and the list fits 12 rows, so nothing is cut.
 HELP = ["KEYS", "↑ ↓  j k   move", "→         open, then first child", "←         fold, then to parent",
         "Space     fold or unfold", "Home End  first, last", "Enter     open detail popup",
-        "?  help       q  quit", "Click a row to open it.", "Click its arrow to fold it.", "Press any key."]
+        "u         update limits", "w         wide or narrow", "?  help    q  quit", "Press any key."]
 HELP_ASCII = ["KEYS", "up down j k   move", "right     open, then first child", "left      fold, then to parent",
               "Space     fold or unfold", "Home End  first, last", "Enter     open detail popup",
-              "?  help       q  quit", "Click a row to open it.", "Click its arrow to fold it.", "Press any key."]
+              "u         update limits", "w         wide or narrow", "?  help    q  quit", "Press any key."]
 MAX_INDENT = 4
 
 
@@ -33,6 +43,60 @@ def fit(text, columns, ellipsis="…"):
             break
         out += ch
     return out + ellipsis
+
+
+def short_reset(seconds):
+    """Seconds until a reset, short enough for a narrow column."""
+    if seconds is None:
+        return ""
+    if seconds <= 0:
+        return "now"
+    for size, suffix in ((86400, "d"), (3600, "h"), (60, "m")):
+        if seconds >= size:
+            return f"{int(seconds // size)}{suffix}"
+    return "now"
+
+
+def tier_for(columns):
+    if columns >= WIDE_COLUMNS:
+        return "wide"
+    return "normal" if columns >= NORMAL_COLUMNS else "narrow"
+
+
+def pad(text, columns):
+    return text + " " * max(columns - width(text), 0)
+
+
+def resize_target(columns):
+    """What `w` resizes the pane to: a strip when it is already wide, a panel otherwise."""
+    return STRIP_WIDTH if columns >= WIDE_COLUMNS else PANEL_WIDTH
+
+
+def pad_left(text, columns):
+    return " " * max(columns - width(text), 0) + text
+
+
+def short_folder(path, columns, ellipsis="…"):
+    """A folder that fits: the home folder becomes ~, then leading parts drop away."""
+    home = os.path.expanduser("~")
+    if path and (path == home or path.startswith(home + os.sep)):
+        path = "~" + path[len(home):]
+    if width(path) <= columns:
+        return path
+    parts = path.split("/")
+    head, tail = parts[0], [part for part in parts[1:] if part]
+    best = ""
+    for keep in range(1, len(tail) + 1):        # keep the root and as much of the end as fits
+        candidate = f"{head}/{ellipsis}/" + "/".join(tail[-keep:])
+        if width(candidate) > columns:
+            break
+        best = candidate
+    for keep in range(1, len(tail) + 1):        # no room for the root: keep only the end
+        candidate = ellipsis + "/" + "/".join(tail[-keep:])
+        if width(candidate) > columns:
+            break
+        best = best or candidate
+    return best or fit(tail[-1] if tail else path, columns, ellipsis)
 
 
 def status(agent):
@@ -85,10 +149,19 @@ def footer(columns, note="", glyphs=None):
     return HINT_FULL if width(HINT_FULL) <= columns else fit(HINT_SHORT, columns)
 
 
-def rows(snapshot, columns, collapsed=(), glyphs=None, frame=0):
+def kind_width(snapshot):
+    """Width of the kind column, so `ro codex` and `claude` line up in wide mode."""
+    widths = [width(f"{a.access + ' ' if a.access else ''}{a.kind}") for a in snapshot.by_key.values()]
+    return max(widths + [width("retired")]) if widths else width("retired")
+
+
+def rows(snapshot, columns, collapsed=(), glyphs=None, frame=0, tier=None):
     """[{text, key, style, mark, look}] for the sidebar. `text` always fits `columns` and ends with
     `mark`, so the drawing layer can colour the mark alone. style: header | error | row | retired."""
     glyphs = glyphs or menu_style.UNICODE
+    tier = tier or tier_for(columns)
+    kind_columns = kind_width(snapshot)
+    mark_columns = max([width(mark(a, glyphs, frame)) for a in snapshot.by_key.values()] or [1])
     out = [{"text": fit(header(snapshot, columns, glyphs), columns, glyphs["ellipsis"]),
             "key": "", "style": "header", "mark": "", "look": ""}]
     for error in snapshot.errors:
@@ -96,9 +169,16 @@ def rows(snapshot, columns, collapsed=(), glyphs=None, frame=0):
                     "mark": "", "look": ""})
 
     def add(agent, prefix, fold):
-        sign = mark(agent, glyphs, frame)
-        kind = "retired" if agent.retired else f"{agent.access + ' ' if agent.access else ''}{agent.kind}"
-        right = f"{kind} {sign}"
+        sign = pad_left(mark(agent, glyphs, frame), mark_columns)   # one column, so what follows lines up
+        if tier == "narrow":
+            right = sign                                   # a strip says who needs you, nothing else
+        else:
+            kind = "retired" if agent.retired else f"{agent.access + ' ' if agent.access else ''}{agent.kind}"
+            right = f"{kind} {sign}"
+            if tier == "wide":
+                folder = pad(short_folder(agent.cwd, FOLDER_COLUMNS, glyphs["ellipsis"]), FOLDER_COLUMNS)
+                model = pad(fit(agent.model, MODEL_COLUMNS, glyphs["ellipsis"]), MODEL_COLUMNS)
+                right = f"{pad(kind, kind_columns)}  {folder}  {model} {sign}"
         room = columns - width(prefix) - width(fold) - width(right) - 2
         name = fit(agent.name, max(room, 4), glyphs["ellipsis"])
         gap = " " * max(columns - width(prefix) - width(fold) - width(name) - width(right) - 1, 1)
@@ -137,6 +217,81 @@ def scroll_top(rendered, selected, room, top):
     top = min(top, index)
     top = max(top, index - room + 1)
     return max(0, min(top, max(len(body) - room, 0)))
+
+
+def bar(percent, width, glyphs):
+    """A `width`-cell bar. Rounds down, so a bar is never full until the limit really is."""
+    percent = max(0, min(100, int(percent)))
+    filled = min(width, percent * width // 100)
+    if percent and not filled:
+        filled = 1        # some use must never look like none
+    return glyphs["bar_full"] * filled + glyphs["bar_empty"] * (width - filled)
+
+
+def _limit_groups(limits):
+    """Parent rows (a whole window) each followed by their per-model rows."""
+    parents = [x for x in limits if not x.get("model")]
+    children = [x for x in limits if x.get("model")]
+    taken, groups = set(), []
+    for parent in parents:
+        kids = [c for c in children
+                if (c["source"], c["window"]) == (parent["source"], parent["window"])]
+        taken.update(id(c) for c in kids)
+        groups.append((parent, kids))
+    for orphan in children:                       # a model with no total of its own still shows
+        if id(orphan) not in taken:
+            groups.append((orphan, []))
+    return groups
+
+
+def limit_rows(limits, columns, glyphs=None, taken_at=None, now=None, errors=()):
+    """[{text, look}] for the LIMITS block. Pure: `now` and `taken_at` are seconds, passed in."""
+    glyphs = glyphs or menu_style.UNICODE
+    if (not limits and not errors) or columns < LIMITS_MIN_COLUMNS:
+        return []
+    out = [{"text": glyphs["rule"] * columns, "look": "faint"}]
+    head, age = " LIMITS", ""
+    if taken_at is not None and now is not None:
+        stamp = time.strftime("%H:%M", time.localtime(taken_at))
+        age = f"stale, {stamp} " if now - taken_at > STALE_SECONDS else f"as of {stamp} "
+    gap = columns - width(head) - width(age)
+    out.append({"text": head + " " * max(gap, 1) + age if gap >= 1 else fit(head, columns, glyphs["ellipsis"]),
+                "look": "faint"})
+
+    rows = []
+    for parent, kids in _limit_groups(limits):
+        label = f"{parent['source']} {parent['window']}".strip()
+        rows.append(("  ", label, parent))
+        for kid in kids:
+            rows.append(("   " + glyphs["last"], kid["model"], kid))
+    if not rows:
+        for error in errors:
+            out.append({"text": fit(" " + error, columns, glyphs["ellipsis"]), "look": "auth"})
+        return out
+
+    # Fit the columns: label, bar, percent, and the reset time if there is room left for it.
+    label_room = max(columns - 2 - 1 - 4 - 1 - 4 - 4, 4)
+    label_width = min(max(width(lead) + width(label) for lead, label, _ in rows), label_room)
+    resets = [short_reset(row[2].get("resets_in")) for row in rows]
+    reset_width = max((width(r) for r in resets), default=0)
+    bar_width = columns - 2 - label_width - 1 - 4 - 1
+    if bar_width - reset_width - 1 >= 3:
+        bar_width -= reset_width + 1
+    else:
+        resets, reset_width = ["" for _ in rows], 0
+    bar_width = max(bar_width, 3)
+
+    for (lead, label, limit), reset in zip(rows, resets):
+        name = fit(label, max(label_width - width(lead), 1), glyphs["ellipsis"])
+        pad = " " * max(label_width - width(lead) - width(name), 0)
+        tail = f"{min(int(limit['percent']), 999):3d}%" + (f" {reset:>{reset_width}}" if reset_width else "")
+        head_text = f"{lead}{name}{pad} {bar(limit['percent'], bar_width, glyphs)}"
+        spacer = " " * max(columns - width(head_text) - width(tail), 1)   # numbers line up on the right edge
+        out.append({"text": fit(head_text + spacer + tail, columns, glyphs["ellipsis"]),
+                    "look": "auth" if limit["percent"] >= LOUD_PERCENT else ""})
+    for error in errors:
+        out.append({"text": fit(" " + error, columns, glyphs["ellipsis"]), "look": "auth"})
+    return out
 
 
 def key_at(rendered, row):

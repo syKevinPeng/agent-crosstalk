@@ -19,6 +19,7 @@ class Agent:
     short_id: str = ""
     cwd: str = ""
     state: str = "unknown"        # working | idle | stopped | needs_owner | unknown
+    model: str = ""               # only where the CLI reports one: Codex does, Claude does not
     background: bool = False
     needs_owner: int = 0
     auth: str = ""                # auth label, e.g. "ssh key passphrase"
@@ -135,7 +136,7 @@ def collect(now=None):
     for entry in raw:
         agent = Agent(key=f"{entry['kind']}:{entry['session_id']}", kind=entry["kind"], name=entry["name"],
                       session_id=entry["session_id"], short_id=entry.get("short_id") or "",
-                      cwd=entry.get("cwd") or "", state=entry["state"], background=entry.get("background", False))
+                      cwd=entry.get("cwd") or "", state=entry["state"], model=entry.get("model") or "", background=entry.get("background", False))
         agent._pid, agent._title = entry.get("pid"), ""
         agents.append(agent)
     _match_panes(agents, panes)

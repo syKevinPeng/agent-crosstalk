@@ -54,6 +54,8 @@ class FakeCodexDaemon:
         return buf
 
     def _answer(self, method, params):
+        if method == "account/rateLimits/read":
+            return getattr(self, "account", {})
         if method == "thread/list":
             hidden = getattr(self, "hidden_from_list", set())
             return {"data": [t for t in self.threads.values() if t["id"] not in hidden]}

@@ -9,6 +9,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_peers import FakeCodexDaemon  # noqa: E402,F401
 
+USAGE_TEXT = """You are currently using your subscription to power your Claude Code usage
+
+Current session: 18% used · resets Sep 17, 7:40pm (America/New_York)
+Current week (all models): 11% used · resets Sep 24, 1pm (America/New_York)
+Current week (Fable): 16% used · resets Sep 24, 1pm (America/New_York)
+
+What's contributing to your limits usage?
+Last 24h · 1347 requests · 8 sessions
+"""
+
 ROOT = Path(__file__).resolve().parents[1]
 BIN = Path(os.environ.get("AGENT_COMMS_BIN") or ROOT / "bin")
 LIB = Path(os.environ.get("AGENT_COMMS_LIB") or ROOT / "lib")
@@ -34,7 +44,12 @@ exit "${STUB_CODEX_EXIT:-1}"
 
 CLAUDE_STUB = r"""#!/usr/bin/env bash
 [[ -n ${STUB_CLAUDE_FAIL:-} ]] && exit 7
-[[ $1 == agents ]] && cat "$STUB_DIR/claude.json"
+[[ $1 == agents ]] && { cat "$STUB_DIR/claude.json"; exit 0; }
+if [[ $1 == -p ]]; then
+  [[ -n ${STUB_USAGE_FAIL:-} ]] && exit 3
+  [[ -n ${STUB_USAGE_GARBAGE:-} ]] && { echo 'not json'; exit 0; }
+  python3 -c 'import json,os,sys; sys.stdout.write(json.dumps({"result": open(os.environ["STUB_DIR"]+"/usage.txt").read()}))'
+fi
 """
 
 
@@ -53,6 +68,7 @@ class Machine:
         self.proc = self.dir / "proc"
         self.proc.mkdir()
         self.panes, self.claude = [], []
+        self.usage(USAGE_TEXT)
         self.env = dict(os.environ, STUB_DIR=str(self.dir), CODEX_APP_SERVER_SOCK=self.sock,
                         TMUX_BIN=str(executable(self.dir / "tmux-stub", TMUX_STUB)),
                         CLAUDE_BIN=str(executable(self.dir / "claude-stub", CLAUDE_STUB)),
@@ -86,6 +102,9 @@ class Machine:
         rows += rows  # a grouped session lists every pane twice
         (self.dir / "panes.tsv").write_text("\n".join(rows) + ("\n" if rows else ""))
         (self.dir / "claude.json").write_text(json.dumps(self.claude))
+
+    def usage(self, text):
+        (self.dir / "usage.txt").write_text(text)
 
     def log(self, name, *records):
         with open(self.dir / name, "a") as fh:

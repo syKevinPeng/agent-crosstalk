@@ -10,10 +10,12 @@ import os
 
 UNICODE = {"auth": "✗", "needs": "!", "unanswered": "✉", "idle": "✓", "stopped": "-",
            "spinner": "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", "open": "▾ ", "closed": "▸ ", "leaf": "  ",
-           "branch": "├ ", "last": "└ ", "deep": "· ", "ellipsis": "…", "separator": " · "}
+           "branch": "├ ", "last": "└ ", "deep": "· ", "ellipsis": "…", "separator": " · ",
+           "bar_full": "█", "bar_empty": "░", "rule": "─"}
 ASCII = {"auth": "X", "needs": "!", "unanswered": "+", "idle": ".", "stopped": "-",
          "spinner": "*", "open": "v ", "closed": "> ", "leaf": "  ",
-         "branch": "|-", "last": "`-", "deep": "- ", "ellipsis": "~", "separator": " | "}
+         "branch": "|-", "last": "`-", "deep": "- ", "ellipsis": "~", "separator": " | ",
+         "bar_full": "#", "bar_empty": ".", "rule": "-"}
 
 # state -> (colour name or "", attribute name or ""). Only three states carry a colour.
 LOOK = {"auth": ("red", "bold"), "needs": ("yellow", "reverse"), "unanswered": ("cyan", ""),

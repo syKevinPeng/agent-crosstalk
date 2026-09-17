@@ -62,6 +62,10 @@ def send_text(pane_id, text):
     _tmux("send-keys", "-t", pane_id, "Enter")
 
 
+def resize(pane_id, columns):
+    _tmux("resize-pane", "-t", pane_id, "-x", str(int(columns)))
+
+
 def focus(pane_id):
     _tmux("select-window", "-t", pane_id)
     _tmux("select-pane", "-t", pane_id)

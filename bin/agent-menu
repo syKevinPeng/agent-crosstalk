@@ -9,6 +9,7 @@ import os
 import shlex
 import sys
 import threading
+import time
 
 BIN = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(BIN), "lib"))
@@ -16,14 +17,33 @@ import agent_state  # noqa: E402
 import menu_curses  # noqa: E402
 import menu_render  # noqa: E402
 import menu_style  # noqa: E402
-from sources import tmux_src  # noqa: E402
+from sources import limits_src, tmux_src  # noqa: E402
 from sources.base import SourceError  # noqa: E402
 
 REFRESH_SECONDS = 2.0
+LIMITS_SECONDS = 15 * 60   # rate limits move slowly, and each Claude reading leaves a transcript file
 TICK_MS = 150
 ACTIONS = {curses.KEY_DOWN: "down", ord("j"): "down", curses.KEY_UP: "up", ord("k"): "up",
            curses.KEY_RIGHT: "right", ord("l"): "right", curses.KEY_LEFT: "left", ord("h"): "left",
            curses.KEY_HOME: "home", ord("g"): "home", curses.KEY_END: "end", ord("G"): "end", ord(" "): "toggle"}
+
+
+class LimitsPoller(threading.Thread):
+    """Reads the rate limits on its own slow clock. Separate from the tree, because the Claude
+    reading takes a few seconds and the tree must keep refreshing while it runs."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.limits, self.errors, self.taken_at, self.wake = [], [], None, threading.Event()
+
+    def run(self):
+        while True:
+            limits, errors = limits_src.read_all()
+            if limits or not self.limits:        # a failed reading never replaces a good one silently
+                self.limits, self.taken_at = limits, time.time()
+            self.errors = errors
+            self.wake.wait(LIMITS_SECONDS)
+            self.wake.clear()
 
 
 class Poller(threading.Thread):
@@ -70,6 +90,8 @@ def run(screen):
     screen.timeout(TICK_MS)
     poller = Poller()
     poller.start()
+    limits = LimitsPoller()
+    limits.start()
     selected, collapsed, note, frame, top = "", set(), "", 0, 0
     while True:
         height, full_width = screen.getmaxyx()
@@ -87,7 +109,15 @@ def run(screen):
             selected, collapsed = menu_render.move(snapshot, collapsed, selected, "stay")
             rendered = menu_render.rows(snapshot, columns, collapsed, glyphs, frame // 2)
             pinned = [row for row in rendered if not row["key"]]
-            room = height - 1 - len(pinned)
+            block = menu_render.limit_rows(limits.limits, columns, glyphs, limits.taken_at,
+                                           time.time(), limits.errors)
+            if height - 1 - len(block) < len(pinned) + 3:
+                block = []                       # a short pane shows agents, not limits
+            for y, row in enumerate(block):
+                attr = curses.A_DIM if row["look"] == "faint" else (
+                    (menu_curses.look("auth", colour) & ~curses.A_REVERSE) | curses.A_BOLD if row["look"] else 0)
+                menu_curses.put(screen, height - 1 - len(block) + y, 0, row["text"], attr)
+            room = height - 1 - len(block) - len(pinned)
             top = menu_render.scroll_top(rendered, selected, room, top)
             on_screen = pinned + rendered[len(pinned) + top:len(pinned) + top + max(room, 0)]
             rendered = on_screen               # from here on, row y on screen is rendered[y]: clicks map right
@@ -119,6 +149,21 @@ def run(screen):
             return
         if pressed == ord("?"):
             show_help(screen)
+            continue
+        if pressed in (ord("w"), ord("W")):
+            pane = os.environ.get("TMUX_PANE")
+            if not pane:
+                note = "not running in a tmux pane"
+            else:
+                try:
+                    target = menu_render.resize_target(columns)
+                    tmux_src.resize(pane, target)
+                except SourceError as exc:
+                    note = str(exc)
+            continue
+        if pressed in (ord("u"), ord("U")):
+            note = "updating limits…"
+            limits.wake.set()
             continue
         if not snapshot:
             continue

@@ -218,6 +218,9 @@ bin/agent-menu --once                                 # print the tree once and 
 - **Looks, and why:** every mark is one cell wide and none is an emoji, because tmux and the terminal can disagree about an emoji's width and that shifts the whole column. Each state has its own shape, so nothing depends on colour alone. Only three states get a colour. Colours are the terminal's own 16 on its default background, so your theme decides the contrast. `NO_COLOR` turns colour off and `FORCE_COLOR` turns it back on. On a terminal that cannot move the cursor, such as `TERM=dumb`, the menu says so and exits, and `--once` still prints the tree. Bold, dim and reverse stay. `AGENT_MENU_ASCII=1`, or a locale that is not UTF-8, switches to plain ASCII. `AGENT_MENU_NO_ANIMATION=1` stops the spinner. No special font is needed.
 - **Keys:** arrows or `j` `k` move. Right opens a parent and then steps to its first child. Left folds a parent, or steps from a child to its parent. Space folds. Home and End jump. Enter opens the popup. `?` shows the keys. `q` quits. Everything the mouse does has a key.
 - **Refreshing costs no tokens.** Every two seconds it reads local state only: `claude agents --json`, the Codex daemon's thread list, tmux, and the two log files. No model is called. Tokens are spent only when an agent takes a turn, which from the menu means only when you send an instruction.
+- **Three layouts, chosen by the pane width.** Below 26 columns it is a strip: fold marks, names and the one mark that matters. From 26 to 47 it adds the kind and the `ro`/`rw` tag. At 48 and wider it also shows each agent's working folder and, where the CLI reports one, its model. Codex reports a model; Claude does not, so that cell stays empty for Claude rows.
+- **`w` resizes the pane** between a 20-column strip and a 62-column panel, so you can widen it for a look and shrink it again. Dragging the pane border yourself works too: the layout follows the width either way.
+- **Rate limits are shown under the tree.** See [Limits](#limits).
 - **Long lists scroll.** The selected row is always on screen, and the header and any error lines stay pinned at the top.
 - **Open an agent:** click its row or press Enter. A tmux popup shows what it is waiting on, its spawned agents, the last messages to and from it, and for a Codex agent with no pane its latest answer. Click the fold arrow or press Space to fold a parent.
 - **What you can do in the popup:** `Open pane` jumps to the agent's pane. `Attach` opens a background Claude session in a new window. The instruction line sends your words to the agent. `Retire` archives or stops an agent that `spawn-peer` created. It is the one risky action, so it takes two steps: `r` arms it, then `y` or Enter confirms, and a confirm within about half a second of arming does not count. These actions exist only inside the popup and have no command-line form. That guards against accidents. It is not a security boundary: a program running as you could import the library, just as it could run `tmux send-keys` itself.
@@ -228,7 +231,28 @@ bin/agent-menu --once                                 # print the tree once and 
 - **Every action is recorded before it happens.** An `attempt` line goes to `log/menu-actions.jsonl` first, and the action is refused if that line cannot be written. A result line follows. So even if the program dies halfway, the record of what was tried exists.
 - **Not built yet:** Approve and Deny buttons for permission prompts. Until then a waiting agent's popup says so and offers `Open pane`.
 - **Look-only mode:** `AGENT_MENU_LOOK_ONLY=1` shows everything and keeps Open pane and Attach, but offers no instruction line and no Retire, and refuses them if called.
-- **Environment:** `AGENT_MENU_ASCII`, `AGENT_MENU_NO_ANIMATION`, `NO_COLOR`, `FORCE_COLOR`, and for tests `AGENT_MENU_PROC_ROOT`, `TMUX_BIN`, `CLAUDE_BIN`, `CODEX_BIN`, `CODEX_APP_SERVER_SOCK`, `AGENT_COMMS_LOG`, `AGENT_COMMS_SPAWN_LOG`, `AGENT_MENU_ACTIONS_LOG`.
+- **Environment:** `AGENT_MENU_ASCII`, `AGENT_MENU_NO_ANIMATION`, `AGENT_MENU_USAGE_CWD`, `NO_COLOR`, `FORCE_COLOR`, and for tests `AGENT_MENU_PROC_ROOT`, `TMUX_BIN`, `CLAUDE_BIN`, `CODEX_BIN`, `CODEX_APP_SERVER_SOCK`, `AGENT_COMMS_LOG`, `AGENT_COMMS_SPAWN_LOG`, `AGENT_MENU_ACTIONS_LOG`.
+
+## Limits
+
+A block under the tree shows how much of each rate limit is used.
+
+```
+ ──────────────────────────────
+ LIMITS              as of 18:21
+  claude session █░░░░░    18% 1h
+  claude week    █░░░░░    11% 6d
+   └ Fable       █░░░░░    16% 6d
+  codex week     ████░░    76% 4d
+```
+
+- **Where the numbers come from.** Claude Code answers `claude -p --output-format json "/usage"`, which runs no model: the call reports zero tokens and zero cost. Codex answers `account/rateLimits/read` on its local daemon. Both use your existing login, and neither needs an API key. Nothing here reads a credential file.
+- **Per model where the CLI reports one.** Claude gives a weekly figure for all models and a second one for the premium model, shown indented under it. Codex reports one account-wide limit, so it has no model line.
+- **A bar turns red at 90%.** That reuses the red already used for "needs you" rather than adding a colour.
+- **It refreshes every 15 minutes**, and `u` refreshes it now. It is not refreshed every few seconds for two reasons: limits move slowly, and each Claude reading leaves a transcript file behind. Those files are kept out of your way in `log/usage-calls/`, which is git-ignored. Nothing under `~/.claude` is deleted.
+- **The header says when the reading was taken**, and says `stale` once it is over 45 minutes old, so an old number never looks current.
+- **The wording is read defensively.** Claude's output is written for a person and can change between versions. Each line is matched on its own, a line that does not match is dropped, and if nothing matches at all the block says so instead of inventing a number.
+- **The block disappears** below 26 columns, and in a short pane, so the tree always keeps the space.
 
 ## Running Codex without approval prompts
 

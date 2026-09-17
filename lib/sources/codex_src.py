@@ -15,7 +15,7 @@ def _thread(raw):
     status = status.get("type") if isinstance(status, dict) else status
     name = clean(raw.get("name")).strip() or raw["id"][:8]                        # never a blank row
     return {"kind": "codex", "session_id": raw["id"], "short_id": raw["id"][:8],
-            "name": name, "cwd": clean(raw.get("cwd")), "pid": None,
+            "name": name, "cwd": clean(raw.get("cwd")), "pid": None, "model": clean(raw.get("model")),
             "state": STATES.get(status, "unknown"), "background": False}
 
 
