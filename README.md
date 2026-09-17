@@ -20,9 +20,11 @@ Everything here is local. Nothing talks to a network service, and no API key is 
 | `bin/spawn-peer` | Creates a named Claude or Codex agent in a folder, read-only unless told otherwise, and records it |
 | `bin/retire-peer` | Archives or stops an agent that `spawn-peer` created. It refuses every other session |
 | `bin/codex-reply` | Prints what a Codex agent said in its latest turn. Read-only. This is how you get a spawned Codex agent's answer |
-| `lib/` | Shared Python modules: the Codex daemon client and the spawn record |
+| `bin/agent-menu` | A tmux sidebar: every Claude and Codex agent, who spawned whom, and who is waiting for you |
+| `bin/agent-menu-detail` | The popup for one agent: what it waits on, its spawned agents, recent messages, and the owner's actions |
+| `lib/` | Shared Python modules: the Codex daemon client, the spawn record, and the menu's readers, collector and renderer |
 | `tests/` | Black-box tests. They use a stub `codex`, a stub `claude`, a fake socket and a fake daemon, never a live session |
-| `log/` | Your local message log and spawn record. Git-ignored, because it holds session names, ids and message summaries |
+| `log/` | Your local message log, spawn record and menu action log. Git-ignored, because it holds session names, ids and message summaries |
 
 Requirements: bash, `jq`, `flock` and Python 3.9 or newer. No Python packages beyond the standard library.
 
@@ -184,6 +186,46 @@ bin/codex-reply [--all] <codex thread id>
 - **Record first:** `spawn-peer` checks that the record is writable before it creates anything, and writes the record before it names a Codex thread. For Codex, a partial failure therefore never leaves a thread that `retire-peer` refuses. A Claude session that launches but never appears in the listing is recorded with `listed=false` and a guessed id, and may need stopping by hand with `claude stop`.
 - **Exit status, both tools:** 0 done and recorded. 1 done but not recorded, and the line is printed. 2 usage error. 3 refused, nothing changed. 4 the step failed.
 - **Environment:** `CODEX_APP_SERVER_SOCK`, `CLAUDE_BIN`, `AGENT_COMMS_SPAWN_LOG`, and `SPAWN_PEER_POLL_SECONDS` (how long to wait for a new Claude session to appear in the listing, default 10).
+
+## Agent menu
+
+```bash
+tmux split-window -hbf -l 34 "$PWD/bin/agent-menu"   # a 34-column sidebar on the left of the current window
+bin/agent-menu --once                                 # print the tree once and exit
+```
+
+```
+ AGENTS  1 need you · 3 unanswered
+ ▾ lead session         claude !1
+   ├ comms-test      ro codex ⠋
+   └ fix-review      rw codex ✉3
+   builder               codex ✓
+```
+
+- **What it shows:** one row per real session: Claude sessions, Codex threads, and agents that `spawn-peer` created. A spawned agent hangs under the agent that created it, with `ro` or `rw` for its access. A retired child stays visible, dimmed, for ten minutes.
+- **Marks, most urgent first:**
+
+  | Mark | ASCII | Meaning | Drawn as |
+  | --- | --- | --- | --- |
+  | `✗` | `X` | waiting for a credential | red, bold |
+  | `!n` | `!n` | waiting for you, with the count when the screen shows one | yellow, reverse |
+  | `✉n` | `+n` | n messages sent to it with no receipt yet | cyan |
+  | spinner | `*` | working | plain |
+  | `✓` | `.` | idle | dim |
+  | `-` | `-` | stopped, retired, or no status reported | dim |
+
+  A source that cannot be read adds a line such as `codex: unreachable` and its rows disappear. The menu never shows stale marks.
+- **Looks, and why:** every mark is one cell wide and none is an emoji, because tmux and the terminal can disagree about an emoji's width and that shifts the whole column. Each state has its own shape, so nothing depends on colour alone. Only three states get a colour. Colours are the terminal's own 16 on its default background, so your theme decides the contrast. `NO_COLOR` or `TERM=dumb` turns colour off and `FORCE_COLOR` turns it back on. Bold, dim and reverse stay. `AGENT_MENU_ASCII=1`, or a locale that is not UTF-8, switches to plain ASCII. `AGENT_MENU_NO_ANIMATION=1` stops the spinner. No special font is needed.
+- **Keys:** arrows or `j` `k` move. Right opens a parent and then steps to its first child. Left folds a parent, or steps from a child to its parent. Space folds. Home and End jump. Enter opens the popup. `?` shows the keys. `q` quits. Everything the mouse does has a key.
+- **Refreshing costs no tokens.** Every two seconds it reads local state only: `claude agents --json`, the Codex daemon's thread list, tmux, and the two log files. No model is called. Tokens are spent only when an agent takes a turn, which from the menu means only when you send an instruction.
+- **Open an agent:** click its row or press Enter. A tmux popup shows what it is waiting on, its spawned agents, the last messages to and from it, and for a Codex agent with no pane its latest answer. Click the fold arrow or press Space to fold a parent.
+- **What you can do in the popup:** `Open pane` jumps to the agent's pane. `Attach` opens a background Claude session in a new window. The instruction line sends your words to the agent. `Retire` archives or stops an agent that `spawn-peer` created, and asks twice. These actions exist only inside the popup. There is no command-line form, so another program cannot call them.
+- **Your instruction is your own input.** For an agent in a pane it is typed into that pane. For a Codex agent with no pane it is queued as plain input with no teammate header. A Claude session with no pane takes input only in its own terminal, so the popup offers `Attach` instead.
+- **The menu only types into a pane it is sure about.** A session is matched to a pane by process id or by an exact, unique title. Two candidates mean no pane. Before typing it checks that the pane still runs the same process.
+- **Credentials never pass through the menu.** When a pane shows a passphrase, password, second-factor or sign-in prompt, the row gets `✗`, the popup says which kind, and the instruction line is switched off. You type the secret in the real pane, where the terminal hides it. The action log stores only the label, for example `ssh key passphrase`, never the screen. The menu never runs a login command and never reads a keyring or token file.
+- **Every action is logged, or not done.** Each action appends a line to `log/menu-actions.jsonl`. If that file cannot be written, the action is refused.
+- **Not built yet:** Approve and Deny buttons for permission prompts. Until then a waiting agent's popup says so and offers `Open pane`.
+- **Environment:** `AGENT_MENU_ASCII`, `AGENT_MENU_NO_ANIMATION`, `NO_COLOR`, `FORCE_COLOR`, and for tests `TMUX_BIN`, `CLAUDE_BIN`, `CODEX_BIN`, `CODEX_APP_SERVER_SOCK`, `AGENT_COMMS_LOG`, `AGENT_COMMS_SPAWN_LOG`, `AGENT_MENU_ACTIONS_LOG`.
 
 ## Running Codex without approval prompts
 
