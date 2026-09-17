@@ -88,6 +88,29 @@ def new_window(name, command):
     _tmux("new-window", "-n", literal(name), command)
 
 
+def alive(pid):
+    proc = os.environ.get("AGENT_MENU_PROC_ROOT") or "/proc"
+    return bool(pid) and os.path.isdir(os.path.join(proc, str(pid)))
+
+
+def ancestors(pid, limit=40):
+    """[(pid, command), ...] from `pid` up towards init, itself first."""
+    proc = os.environ.get("AGENT_MENU_PROC_ROOT") or "/proc"
+    chain, seen = [], set()
+    while pid and pid > 1 and pid not in seen and len(chain) < limit:
+        seen.add(pid)
+        try:
+            with open(os.path.join(proc, str(pid), "stat"), encoding="utf-8", errors="replace") as fh:
+                stat = fh.read()
+            command = stat[stat.index("(") + 1:stat.rindex(")")]
+            parent = int(stat[stat.rindex(")") + 2:].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+        chain.append((pid, command))
+        pid = parent
+    return chain
+
+
 def descendants(root_pid):
     """Process ids below `root_pid`, read from /proc. Used to find which pane runs a session."""
     proc = os.environ.get("AGENT_MENU_PROC_ROOT") or "/proc"

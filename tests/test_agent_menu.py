@@ -176,9 +176,33 @@ class AgentMenuTest(unittest.TestCase):
         self.m.pane(7, 700, "bash", "builder | proj")                              # any program can set a title
         self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send")
 
+    def test_a_session_started_inside_another_session_gets_no_pane(self):
+        self.m.claude_session(CLAUDE_A, "lead", 110)                      # runs in the pane
+        self.m.claude_session(CLAUDE_B, "helper", 120, cwd="/w")          # started by lead's Bash tool
+        self.m.pane(1, 100, "claude", "lead")
+        self.m.process(110, 100)
+        self.m.process(120, 110)
+        self.assertEqual(self.buttons(f"claude:{CLAUDE_A}"), "buttons: Open pane, Send")
+        self.assertEqual(self.buttons(f"claude:{CLAUDE_B}"), "buttons: Attach")   # no pane, so no typing
+
+    def test_a_nested_session_with_the_same_name_gets_no_pane_either(self):
+        self.m.claude_session(CLAUDE_A, "twin", 110)
+        self.m.claude_session(CLAUDE_B, "twin", 120, cwd="/w")
+        self.m.pane(1, 100, "claude", "twin")
+        self.m.process(110, 100)
+        self.m.process(120, 110)
+        self.assertEqual(self.buttons(f"claude:{CLAUDE_B}"), "buttons: Attach")
+
+    def test_a_live_session_that_runs_in_no_pane_takes_nobody_elses(self):
+        self.m.claude_session(CLAUDE_A, "lead", 900, cwd="/w")            # alive, but under no pane
+        self.m.pane(1, 100, "claude", "lead")                             # an unlisted session shows this title
+        self.m.process(900, 1)
+        self.assertEqual(self.buttons(f"claude:{CLAUDE_A}"), "buttons: Attach")
+
     def test_a_claude_pane_is_matched_through_its_status_glyph(self):
         self.m.claude_session(CLAUDE_A, "lead session", 500, status="busy")
         self.m.pane(4, 400, "claude", "✳ lead session")
+        self.m.process(500, 400)
         self.assertEqual(self.buttons(f"claude:{CLAUDE_A}"), "buttons: Open pane, Send")
 
     def test_a_hostile_session_name_is_neutralised_everywhere(self):

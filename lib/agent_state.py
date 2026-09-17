@@ -20,6 +20,7 @@ class Agent:
     cwd: str = ""
     state: str = "unknown"        # working | idle | stopped | needs_owner | unknown
     model: str = ""               # only where the CLI reports one: Codex does, Claude does not
+    pid: int = 0                  # the session's own process, where the CLI reports one
     background: bool = False
     needs_owner: int = 0
     auth: str = ""                # auth label, e.g. "ssh key passphrase"
@@ -56,23 +57,34 @@ def title_names(kind, title):
     return {clean(name) for name in names if name}
 
 
+def pane_for_pid(pid, panes, blocking_pids=()):
+    """The pane a process runs in: walk up from it to the first tmux pane. `blocking_pids` are other
+    sessions; if one sits between, this process is running inside THAT session, not in the pane, so
+    it gets no pane. One agent's Bash tool starting another agent must not hand over its pane."""
+    by_pid = {pane["pid"]: pane for pane in panes}
+    for step, (walked, command) in enumerate(tmux_src.ancestors(pid)):
+        if walked in by_pid:
+            return by_pid[walked]
+        if step and walked in blocking_pids:
+            return None
+    return None
+
+
 def _match_panes(agents, panes):
     """Give an agent a pane only when exactly one pane fits it AND no other agent fits that pane.
     A doubtful match means no pane: the menu then offers no typing at all."""
-    trees = {p["pane_id"]: tmux_src.descendants(p["pid"]) | {p["pid"]} for p in panes}
+    session_pids = {a.pid for a in agents if a.pid}
     claims = {}
     for agent in agents:
         if agent.state == "stopped":
             continue  # a thread that is not running cannot be what a live pane shows
-        by_pid, by_title = [], []
-        for pane in panes:
-            if pane["command"] != agent.kind:
-                continue
-            if agent.kind == "claude" and agent._pid in trees[pane["pane_id"]]:
-                by_pid.append(pane)
-            if agent.name in title_names(agent.kind, pane["title"]):
-                by_title.append(pane)
-        fits = by_pid if len(by_pid) == 1 else by_title   # a process id is certain, a title is a reading
+        by_title = [pane for pane in panes
+                    if pane["command"] == agent.kind and agent.name in title_names(agent.kind, pane["title"])]
+        if agent.kind == "claude" and tmux_src.alive(agent.pid):
+            owner = pane_for_pid(agent.pid, panes, session_pids)     # a live process: its own pane or none
+            fits = [owner] if owner and owner["command"] == agent.kind else []
+        else:
+            fits = by_title
         if len(fits) == 1:
             claims.setdefault(fits[0]["pane_id"], []).append((agent, fits[0]))
     for claimants in claims.values():
@@ -137,7 +149,7 @@ def collect(now=None):
         agent = Agent(key=f"{entry['kind']}:{entry['session_id']}", kind=entry["kind"], name=entry["name"],
                       session_id=entry["session_id"], short_id=entry.get("short_id") or "",
                       cwd=entry.get("cwd") or "", state=entry["state"], model=entry.get("model") or "", background=entry.get("background", False))
-        agent._pid, agent._title = entry.get("pid"), ""
+        agent.pid, agent._title = entry.get("pid") or 0, ""
         agents.append(agent)
     _match_panes(agents, panes)
     _link_parents(agents, spawned)

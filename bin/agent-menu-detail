@@ -156,6 +156,16 @@ def run(screen, key):
             curses.flushinp()                               # whatever was pasted along with the arming key is dropped
         if not chosen:
             continue
+        if chosen in menu_popup.RISKY:
+            # One last guard against a paste whose chunk boundary happened to land on the confirm
+            # key: if more keys are already waiting, a person did not type this.
+            screen.timeout(120)
+            trailing = read_event(screen)
+            screen.timeout(RELOAD_MS)
+            if trailing is not None:
+                curses.flushinp()
+                state, note = menu_popup.cancel(state), "cancelled: more keys followed, so that looked pasted"
+                continue
         note, succeeded, close = menu_actions.perform(agent, chosen, state.text)
         state = menu_popup.after_action(state, chosen, succeeded)
         curses.flushinp()                                   # the rest of a paste must not run as hotkeys

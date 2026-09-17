@@ -103,6 +103,19 @@ class MenuActionsTest(unittest.TestCase):
         self.assertEqual(self.acted(), [])
         self.assertEqual(self.m.actions(), [])
 
+    def test_a_claude_session_restarted_in_the_same_pane_gets_no_keys(self):
+        """The CLI exits, the owner starts another session in the same shell: same pid, same name."""
+        self.m.pane(4, 400, "claude", "lead")      # this also puts pid 400 in the fake /proc
+        self.m.process(500, 400)
+        session = agent_state.Agent(key="claude:s", kind="claude", name="lead", session_id="s",
+                                    pane_id="%4", pane_pid=400, pid=500)
+        self.assertEqual(menu_actions.open_pane(session), "pane focused")
+        shutil.rmtree(self.m.proc / "500")         # the old session exited; another one now owns the pane
+        self.m.process(501, 400)
+        with self.assertRaises(menu_actions.Refused):
+            menu_actions.instruct(session, "hello")
+        self.assertEqual([c for c in self.acted() if c.startswith("send-keys")], [])
+
     def test_a_pane_that_now_shows_another_session_gets_no_keys(self):
         self.m.panes = [(7, 700, "codex", "a different thread | proj")]     # same shell, same CLI, another session
         self.m.write()

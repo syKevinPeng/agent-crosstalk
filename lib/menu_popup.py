@@ -2,8 +2,13 @@
 
 Pasted text must never act. Ordinary words hold the hotkeys (`error` has `rr`), so two rules apply
 outside the instruction line. A character that arrives within BURST seconds of the previous one is
-part of a paste and is ignored. And the risky action needs a second, different kind of step: after
-`r` arms it, only `y` or Enter confirms, and only once SETTLE seconds have passed.
+part of a paste and is ignored.
+
+The risky action needs a second, different kind of step: `r` arms it, and then only `y` or Enter
+confirms, only once SETTLE seconds have passed, and only as the very next key. Anything else
+disarms it, a pasted key included. That is what stops a paste arriving in chunks: a pause between
+chunks looks like a person, but the characters in between disarm the button long before the chunk
+that happens to contain a `y`.
 
 Inside the instruction line a paste is welcome as text, but it must never send itself: a pasted
 block that starts with `i` and ends with a newline would otherwise become an instruction to an
@@ -46,7 +51,7 @@ def _press(state, button, now, confirming=False):
         if confirming and state.confirm == button and now - state.armed_at >= SETTLE:
             return dataclasses.replace(state, confirm=""), button
         if state.confirm == button:
-            return state, ""                                  # too soon, or not a confirm key: stay armed
+            return dataclasses.replace(state, confirm=""), ""   # too soon, or pressed again: disarm
         return dataclasses.replace(state, confirm=button, armed_at=now), ""
     return dataclasses.replace(state, confirm=""), button
 
@@ -89,7 +94,7 @@ def _step(state, offered, event, page, now, burst, since):
                 (dataclasses.replace(state, close=True), "")
         if value == "enter" and offered:
             if burst:
-                return state, ""                                # a newline inside a paste presses nothing
+                return dataclasses.replace(state, confirm=""), ""   # a newline inside a paste disarms
             if state.confirm:
                 return _press(state, state.confirm, now, confirming=True)
             return _press(state, offered[min(state.focus, len(offered) - 1)], now)
@@ -104,12 +109,12 @@ def _step(state, offered, event, page, now, burst, since):
         return dataclasses.replace(state, confirm=""), ""
 
     if burst:
-        return state, ""                                        # part of a paste: not a hotkey, not a cancel
+        # Part of a paste. It presses nothing, and it disarms: a later chunk must not find the
+        # button still armed and confirm it.
+        return dataclasses.replace(state, confirm=""), ""
     if state.confirm:
         if value == "y":
             return _press(state, state.confirm, now, confirming=True)
-        if HOTKEYS.get(value) == state.confirm:
-            return state, ""                                    # the arming key again is not a confirm
         return dataclasses.replace(state, confirm=""), ""       # any other key cancels
     if value == "q":
         return dataclasses.replace(state, close=True), ""
@@ -119,6 +124,11 @@ def _step(state, offered, event, page, now, burst, since):
     if button in offered:
         return _press(state, button, now)
     return state, ""
+
+
+def cancel(state):
+    """Disarm, without pressing anything."""
+    return dataclasses.replace(state, confirm="")
 
 
 def after_action(state, button, succeeded):

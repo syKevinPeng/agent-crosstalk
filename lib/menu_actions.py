@@ -62,9 +62,10 @@ def _same_pane(agent):
     """The pane must still hold the same first process AND still be running the agent's CLI in the
     foreground. When a CLI exits, its shell keeps the pane and the pid, so the pid alone proves nothing."""
     try:
-        now = {p["pane_id"]: p for p in tmux_src.list_panes()}.get(agent.pane_id)
+        panes = tmux_src.list_panes()
     except SourceError:
         raise Refused("that pane is gone") from None
+    now = {p["pane_id"]: p for p in panes}.get(agent.pane_id)
     if not now:
         raise Refused("that pane is gone")
     if now["pid"] != agent.pane_pid or now["command"] != agent.kind:
@@ -72,6 +73,10 @@ def _same_pane(agent):
     if agent.name not in agent_state.title_names(agent.kind, now["title"]):
         # Same shell, same CLI, but the title names another session: the owner quit one and started another.
         raise Refused("that pane now shows a different session")
+    if agent.kind == "claude" and agent.pid:
+        owner = agent_state.pane_for_pid(agent.pid, panes)
+        if not owner or owner["pane_id"] != agent.pane_id:
+            raise Refused("that session no longer runs in that pane")
 
 
 def instruct(agent, text):

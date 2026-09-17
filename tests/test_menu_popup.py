@@ -5,7 +5,7 @@ import unittest
 from menu_fixtures import LIB
 
 sys.path.insert(0, str(LIB))
-from menu_popup import SETTLE, State, after_action, step  # noqa: E402
+from menu_popup import SETTLE, State, after_action, cancel, step  # noqa: E402
 
 ALL = ["Open pane", "Send", "Retire"]
 HUMAN, PASTE = 1.0, 0.001          # seconds between events: a person, and a paste
@@ -31,21 +31,68 @@ class PopupTest(unittest.TestCase):
         self.assertEqual(play(ALL, chars("r"))[1], [])
         self.assertEqual(play(ALL, chars("ry"))[1], ["Retire"])
         self.assertEqual(play(ALL, chars("r") + [("key", "enter")])[1], ["Retire"])
-        self.assertEqual(play(ALL, chars("rr"))[1], [])                    # the arming key again is not a confirm
-        self.assertEqual(play(ALL, chars("rrrry"))[1], ["Retire"])         # still armed, then a real confirm
+        self.assertEqual(play(ALL, chars("rr"))[1], [])                    # pressing it again cancels
+        self.assertEqual(play(ALL, chars("rry"))[1], [])                   # and stays cancelled
         self.assertEqual(play(ALL, chars("rxy"))[1], [])                   # x cancelled, so y confirms nothing
+        self.assertEqual(play(ALL, chars("rrry"))[1], ["Retire"])          # armed, cancelled, armed, confirmed
         self.assertEqual(play(ALL, [("click", "Retire"), ("click", "Retire")])[1], ["Retire"])
         self.assertEqual(play(ALL, [("click", "Retire"), ("click", "Open pane")])[1], ["Open pane"])
         state, actions = play(ALL, chars("r") + [("key", "esc")])
         self.assertEqual((actions, state.close, state.confirm), ([], False, ""))   # Esc cancels, does not close
 
-    def test_a_confirm_that_comes_too_soon_does_not_count(self):
+    def test_a_confirm_that_comes_too_soon_cancels_the_whole_thing(self):
         quick = SETTLE / 2
-        self.assertEqual(play(ALL, [("char", "r"), ("char", "y", quick)])[1], [])
-        self.assertEqual(play(ALL, [("char", "r"), ("key", "enter", quick)])[1], [])
-        self.assertEqual(play(ALL, [("click", "Retire"), ("click", "Retire", quick)])[1], [])
-        state, actions = play(ALL, [("char", "r"), ("char", "y", quick), ("char", "y", SETTLE)])
-        self.assertEqual(actions, ["Retire"])                              # stayed armed; a later confirm counts
+        for events in ([("char", "r"), ("char", "y", quick)],
+                       [("char", "r"), ("key", "enter", quick)],
+                       [("click", "Retire"), ("click", "Retire", quick)],
+                       [("char", "r"), ("char", "y", quick), ("char", "y", SETTLE)]):
+            with self.subTest(events=events):
+                state, actions = play(ALL, events)
+                self.assertEqual((actions, state.confirm), ([], ""))        # disarmed: r must be pressed again
+        self.assertEqual(play(ALL, [("char", "r"), ("char", "y", quick),
+                                    ("char", "r", 1.0), ("char", "y", 1.0)])[1], ["Retire"])
+
+    def test_a_paste_arriving_in_chunks_never_retires(self):
+        """Terminals deliver a big paste in chunks with a human-looking pause between them."""
+        def chunked(pieces, between):
+            state, now, actions = State(), 100.0, []
+            for text, gap in ((piece, between) for piece in pieces):
+                for index, letter in enumerate(text):
+                    now += gap if index == 0 else PASTE
+                    event = ("key", "enter") if letter == "\n" else ("char", letter)
+                    state, action = step(state, ALL, event, now=now)
+                    if action:
+                        actions.append(action)
+            return actions
+
+        for pieces in (["rm a\n", "rm b\n", "rm c\n", "yes\n"],
+                       ["run one", "run two", "run three", "yes"],
+                       ["rest of it", "yes do"],
+                       ["sorry, retry", "yes"],
+                       ["retry that", "yes do it"],
+                       ["r\n", "yes"],                      # a pasted newline must disarm too
+                       ["fix the error\n", "y"]):
+            for between in (0.1, 0.2, 0.3, 0.7):
+                with self.subTest(pieces=pieces, between=between):
+                    self.assertNotIn("Retire", chunked(pieces, between))
+        self.assertEqual(chunked(["r"], 1.0) + chunked(["y"], 1.0), [])     # each alone does nothing
+
+    def test_the_one_shape_this_cannot_judge_is_left_to_the_popup(self):
+        """A chunk that is exactly `r`, a pause, then a chunk starting `y` is the same input a person
+        makes when confirming. The state machine allows it; bin/agent-menu-detail then looks for keys
+        still arriving behind the confirm and cancels when it finds any."""
+        state, now, actions = State(), 100.0, []
+        for letter, gap in [("r", 1.0)] + [(c, 0.7 if i == 0 else PASTE) for i, c in enumerate("yes please")]:
+            now += gap
+            state, action = step(state, ALL, ("char", letter), now=now)
+            if action:
+                actions.append(action)
+        self.assertEqual(actions, ["Retire"])
+
+    def test_cancel_disarms_without_pressing_anything(self):
+        state, _ = play(ALL, chars("r"))
+        self.assertEqual(state.confirm, "Retire")
+        self.assertEqual(after_action(cancel(state), "Retire", succeeded=False).confirm, "")
 
     def test_pasted_text_outside_the_instruction_line_never_retires(self):
         for text in ("see the error above", "current", "clear\nnext", "rry", "ry\n", "r\ny", "arry carry",
