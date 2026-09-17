@@ -55,7 +55,8 @@ class FakeCodexDaemon:
 
     def _answer(self, method, params):
         if method == "thread/list":
-            return {"data": list(self.threads.values())}
+            hidden = getattr(self, "hidden_from_list", set())
+            return {"data": [t for t in self.threads.values() if t["id"] not in hidden]}
         if method == "thread/start":
             self.threads[THREAD_ID] = {"id": THREAD_ID, "name": None, "cwd": params.get("cwd")}
             return {"thread": self.threads[THREAD_ID]}
