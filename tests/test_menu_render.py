@@ -17,6 +17,12 @@ class AuthReadersTest(unittest.TestCase):
             "Enter passphrase for key '/k/id': ": "ssh key passphrase",
             "[sudo] password for someone: ": "sudo password",
             "someone@cluster's password: ": "password",
+            "Password for 'https://user@host.example': ": "password",
+            "(current) UNIX password: ": "password",
+            "Vault password: ": "password",
+            "Username for 'https://host.example': ": "username",
+            "Enter PIN: ": "credential", "passphrase: ": "credential", "Enter your OTP: ": "credential",
+            "Token: ": "credential", "Passcode: ": "credential", "Enter MFA code": "credential",
             "Duo two-factor login for someone": "second factor",
             "Passcode or option (1-3): ": "second factor",
             "Verification code: ": "second factor",
@@ -29,12 +35,21 @@ class AuthReadersTest(unittest.TestCase):
             with self.subTest(screen=screen):
                 self.assertEqual(auth_readers.detect_screen("some earlier output\n" + screen), label)
 
-    def test_ordinary_screens_and_old_prompts_are_not_auth(self):
-        self.assertIsNone(auth_readers.detect_screen("› Ask Codex to do anything\n"))
-        self.assertIsNone(auth_readers.detect_screen("The password: field in the form is validated here.\n"))
-        old = "Password: \n" + "\n".join(f"line {i}" for i in range(10))
-        self.assertIsNone(auth_readers.detect_screen(old))     # scrolled up, no longer the live prompt
-        self.assertIsNone(auth_readers.detect_screen(""))
+    def test_a_prompt_is_found_behind_the_cli_chrome_drawn_around_and_under_it(self):
+        footer = "\n──────\n❯ \n──────\n  ⏵⏵ auto mode on (shift+tab to cycle)\n  status line\n  another line\n"
+        for shown in ("  ⎿  Password: ", "│ Password:", "  └ [sudo] password for someone: ", "• Enter passphrase for key '/k': "):
+            with self.subTest(shown=shown):
+                self.assertIsNotNone(auth_readers.detect_screen("running...\n" + shown + footer))
+
+    def test_ordinary_screens_mentions_and_old_prompts_are_not_auth(self):
+        for screen in ("› Ask Codex to do anything\n", "", "The password: field in the form is validated here.\n",
+                       "You can run gh auth login later.", "I suggest gcloud auth login if needed.",
+                       "The docs say please run /login when the session expires.", "password policy: strong",
+                       "The token: field is parsed and then stored"):
+            with self.subTest(screen=screen):
+                self.assertIsNone(auth_readers.detect_screen(screen))
+        old = "Password: \n" + "\n".join(f"line {i}" for i in range(20))
+        self.assertIsNone(auth_readers.detect_screen(old))     # scrolled far up, no longer the live prompt
 
     def test_auth_failures_in_an_answer_are_labelled(self):
         self.assertEqual(auth_readers.detect_output("git@host: Permission denied (publickey)."), "ssh key rejected")
@@ -47,6 +62,8 @@ class RenderTest(unittest.TestCase):
         by_key = {}
 
         def walk(agent):
+            if agent.key in by_key:
+                return                      # the loop test builds a cycle on purpose
             by_key[agent.key] = agent
             for child in agent.children:
                 walk(child)
@@ -120,6 +137,7 @@ class RenderTest(unittest.TestCase):
         row = menu_render.rows(self.snap(self.agent("root", children=[gone])), 34)[2]
         self.assertEqual(row["style"], "retired")
         self.assertTrue(row["text"].endswith("retired -"), row["text"])
+        self.assertEqual(row["mark"], "-")
 
     def test_folding_hides_children_and_rows_map_back_to_agents(self):
         child = self.agent("child")
@@ -155,12 +173,55 @@ class RenderTest(unittest.TestCase):
         for line in menu_render.HELP:
             self.assertLessEqual(menu_render.width(line), 32, line)
 
+    def test_any_depth_is_drawn_and_a_loop_in_the_records_draws_each_agent_once(self):
+        d = self.agent("level3")
+        c = self.agent("level2", children=[d])
+        b = self.agent("level1", children=[c])
+        a = self.agent("level0", children=[b])
+        names = [row["text"].split()[1] if row["key"] else "" for row in menu_render.rows(self.snap(a), 40)]
+        self.assertEqual([n for n in names if n], ["level0", "level1", "level2", "level3"])
+        d.children.append(a)                                   # a forged loop: level3 "made" level0
+        looped = menu_render.rows(self.snap(a), 40)
+        self.assertEqual(len([r for r in looped if r["key"]]), 4)
+        for row in looped:
+            self.assertLessEqual(menu_render.width(row["text"]), 40)
+
+    def test_the_selected_row_is_always_on_screen(self):
+        agents = [self.agent(f"agent{i:03}") for i in range(200)]
+        rendered = menu_render.rows(self.snap(*agents, errors=["codex: unreachable"]), 34)
+        keys = [row["key"] for row in rendered if row["key"]]
+        top = 0
+        for wanted in (keys[0], keys[150], keys[-1], keys[3], keys[60]):
+            top = menu_render.scroll_top(rendered, wanted, 10, top)
+            self.assertIn(wanted, keys[top:top + 10])
+            self.assertTrue(0 <= top <= len(keys) - 10)
+        self.assertEqual(menu_render.scroll_top(rendered, "k:gone", 10, 50), 0)
+        self.assertEqual(menu_render.scroll_top(rendered[:5], keys[1], 10, 7), 0)     # everything fits: no scroll
+
+    def test_a_combining_mark_takes_no_cell_so_the_mark_is_not_drawn_twice(self):
+        self.assertEqual(menu_render.width("e\u0301"), 1)
+        row = menu_render.rows(self.snap(self.agent("cafe\u0301 session", state="idle")), 34)[1]
+        self.assertEqual(menu_render.width(row["text"]), 33)
+        self.assertEqual(row["text"].count("✓"), 1)
+
+    def test_a_retired_agent_shows_only_the_stopped_mark(self):
+        gone = self.agent("done", retired=True, state="idle", open_messages=2, needs_owner=1, auth="password")
+        self.assertEqual((menu_render.status(gone), menu_render.mark(gone)), ("stopped", "-"))
+
+    def test_help_and_footer_have_ascii_forms(self):
+        for line in menu_render.HELP_ASCII + [menu_render.footer(34, glyphs=menu_style.ASCII)]:
+            self.assertTrue(line.isascii(), line)
+            self.assertLessEqual(len(line), 32)
+        self.assertLessEqual(len(menu_render.HELP), 12)
+        self.assertLessEqual(len(menu_render.HELP_ASCII), 12)
+
     def test_footer_has_a_short_form_and_too_small_is_detected(self):
         self.assertIn("? help", menu_render.footer(34))
         self.assertLessEqual(menu_render.width(menu_render.footer(18)), 18)
         self.assertEqual(menu_render.footer(34, "pane focused"), " pane focused")
         self.assertTrue(menu_render.too_small(3, 34))
-        self.assertTrue(menu_render.too_small(40, 12))
+        self.assertTrue(menu_render.too_small(40, 19))
+        self.assertFalse(menu_render.too_small(40, 20))          # exactly the minimum is enough
         self.assertFalse(menu_render.too_small(40, 34))
 
 

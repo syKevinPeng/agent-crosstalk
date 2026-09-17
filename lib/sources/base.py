@@ -10,7 +10,7 @@ class SourceError(Exception):
 def read_jsonl(path):
     """Every JSON object in a log file. Torn or foreign lines are skipped, never fatal."""
     try:
-        with open(path, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()
     except FileNotFoundError:
         return []

@@ -2,6 +2,7 @@
 import dataclasses
 import datetime
 import re
+import unicodedata
 
 import auth_readers
 from sources import claude_src, codex_src, logs_src, tmux_src
@@ -40,22 +41,42 @@ class Snapshot:
     errors: list                  # e.g. ["codex: unreachable"]
 
 
+def clean(name):
+    """A session name is chosen by the agent, so it is untrusted text. Control characters, escape
+    sequences, newlines and tabs become `?` before the name reaches a screen, stdout or a log."""
+    return "".join(ch if ch.isprintable() and unicodedata.category(ch) != "Cf" else "?" for ch in name or "")
+
+
+def title_name(kind, title):
+    """The session name a CLI puts in its pane title. Claude: `<status glyph> <name>`.
+    Codex: `[<status> |] <glyph> <name> | <project>`, so the name is the segment before the last."""
+    parts = [part.strip() for part in title.split("|")]
+    segment = parts[-2] if kind == "codex" and len(parts) >= 2 else parts[0] if kind == "codex" else title.strip()
+    return re.sub(r"^[^\w\s]{1,2}\s+", "", segment)   # drop a leading spinner or status glyph
+
+
 def _match_panes(agents, panes):
-    """Give an agent a pane only when exactly one pane fits. A doubtful match means no pane."""
+    """Give an agent a pane only when exactly one pane fits it AND no other agent fits that pane.
+    A doubtful match means no pane: the menu then offers no typing at all."""
     trees = {p["pane_id"]: tmux_src.descendants(p["pid"]) | {p["pid"]} for p in panes}
+    claims = {}
     for agent in agents:
+        if agent.state == "stopped":
+            continue  # a thread that is not running cannot be what a live pane shows
         fits = []
         for pane in panes:
             if pane["command"] != agent.kind:
                 continue
-            title_parts = [part.strip() for part in pane["title"].split("|")]
             by_pid = agent.kind == "claude" and agent._pid in trees[pane["pane_id"]]
-            by_title = agent.name in title_parts
+            by_title = clean(title_name(agent.kind, pane["title"])) == agent.name
             if by_pid or by_title:
                 fits.append(pane)
         if len(fits) == 1:
-            agent.pane_id, agent.pane_pid = fits[0]["pane_id"], fits[0]["pid"]
-            agent._title = fits[0]["title"]
+            claims.setdefault(fits[0]["pane_id"], []).append((agent, fits[0]))
+    for claimants in claims.values():
+        if len(claimants) == 1:
+            agent, pane = claimants[0]
+            agent.pane_id, agent.pane_pid, agent._title = pane["pane_id"], pane["pid"], pane["title"]
 
 
 def _link_parents(agents, spawned):
@@ -69,19 +90,33 @@ def _link_parents(agents, spawned):
         child.retired = record["retired_at"] is not None
         label = record["spawned_by"]
         parent = by_short.get(logs_src.label_short_id(label) or "")
-        if not parent:
-            wanted = logs_src.normalise(label)
-            kind = label.split("/", 1)[0].lower() if "/" in label else ""
-            named = [a for a in agents if logs_src.normalise(a.name) == wanted and (not kind or a.kind == kind)]
+        if not parent and "/" in label:
+            # A label is what the creator called itself. Without a short id it must at least name
+            # its kind, and exactly one live agent of that kind may carry the name.
+            kind, wanted = label.split("/", 1)[0].lower(), logs_src.normalise(label)
+            named = [a for a in agents if a.kind == kind and logs_src.normalise(a.name) == wanted]
             parent = named[0] if len(named) == 1 else None
         if parent and parent is not child:
             child.parent_key = parent.key
+    # A forged or mistaken record can make a loop (A made B, B made A). Cut it, so nobody vanishes.
+    by_key = {a.key: a for a in agents}
+    for agent in agents:
+        seen, walker = {agent.key}, agent
+        while walker.parent_key in by_key:
+            if walker.parent_key in seen:
+                walker.parent_key = ""
+                break
+            seen.add(walker.parent_key)
+            walker = by_key[walker.parent_key]
 
 
 def collect(now=None):
     now = now or datetime.datetime.now(datetime.timezone.utc)
     errors, raw = [], []
-    spawned = logs_src.spawned()
+    try:
+        spawned = logs_src.spawned()
+    except SourceError:
+        spawned, _ = [], errors.append("spawn log: unreadable")
     recent_ids = [s["id"] for s in spawned if s["kind"] == "codex"
                   and (s["retired_at"] is None or now - s["retired_at"] < RETIRED_VISIBLE)]
     for label, reader in (("claude", claude_src.list_sessions),
@@ -97,7 +132,7 @@ def collect(now=None):
 
     agents = []
     for entry in raw:
-        agent = Agent(key=f"{entry['kind']}:{entry['session_id']}", kind=entry["kind"], name=entry["name"],
+        agent = Agent(key=f"{entry['kind']}:{entry['session_id']}", kind=entry["kind"], name=clean(entry["name"]),
                       session_id=entry["session_id"], short_id=entry.get("short_id") or "",
                       cwd=entry.get("cwd") or "", state=entry["state"], background=entry.get("background", False))
         agent._pid, agent._title = entry.get("pid"), ""
@@ -105,7 +140,10 @@ def collect(now=None):
     _match_panes(agents, panes)
     _link_parents(agents, spawned)
 
-    open_counts = logs_src.open_messages()
+    try:
+        open_counts = logs_src.open_messages()
+    except SourceError:
+        open_counts, _ = {}, errors.append("message log: unreadable")
     for agent in agents:
         agent.open_messages = open_counts.get(agent.session_id, 0)
         if agent.state == "needs_owner":
@@ -128,7 +166,8 @@ def collect(now=None):
     visible = []
     for agent in agents:
         retired_at = retire_times.get(agent.session_id) or retire_times.get(agent.short_id)
-        if agent.retired and retired_at and now - retired_at >= RETIRED_VISIBLE and not agent.open_messages:
+        overdue = retired_at and (now - retired_at >= RETIRED_VISIBLE or retired_at > now)  # a future time is a bad record
+        if agent.retired and overdue and not agent.open_messages:
             continue
         if agent.state == "stopped" and not agent.spawned and not agent.open_messages and not agent.pane_id:
             continue

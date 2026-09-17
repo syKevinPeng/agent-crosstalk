@@ -38,7 +38,9 @@ class Poller(threading.Thread):
             try:
                 self.snapshot, self.failure = agent_state.collect(), ""
             except Exception as exc:  # the sidebar must outlive any one bad refresh
+                # Never keep showing the last good tree: that would be stale marks presented as current.
                 self.failure = f"refresh failed: {type(exc).__name__}"
+                self.snapshot = agent_state.Snapshot(roots=[], by_key={}, errors=[self.failure])
             self.wake.wait(REFRESH_SECONDS)
             self.wake.clear()
 
@@ -55,7 +57,8 @@ def open_detail(agent):
 
 def show_help(screen):
     screen.erase()
-    for y, line in enumerate(menu_render.HELP[:curses.LINES - 1]):
+    lines = menu_render.HELP_ASCII if menu_style.use_ascii() else menu_render.HELP
+    for y, line in enumerate(lines[:curses.LINES - 1]):
         menu_curses.put(screen, y, 1, menu_render.fit(line, curses.COLS - 2), curses.A_BOLD if y == 0 else 0)
     screen.noutrefresh()
     curses.doupdate()
@@ -65,21 +68,21 @@ def show_help(screen):
 
 
 def run(screen):
-    curses.curs_set(0)
+    menu_curses.cursor(False)
     colour = menu_curses.setup(screen)
     glyphs = menu_style.glyphs()
     moving = menu_style.animate()
     screen.timeout(TICK_MS)
     poller = Poller()
     poller.start()
-    selected, collapsed, note, frame = "", set(), "", 0
+    selected, collapsed, note, frame, top = "", set(), "", 0, 0
     while True:
-        height, columns = screen.getmaxyx()
-        columns -= 1  # never write the last column: some terminals wrap there
+        height, full_width = screen.getmaxyx()
+        columns = full_width - 1  # never write the last column: some terminals wrap there
         snapshot = poller.snapshot
         frame += 1 if moving else 0
         screen.erase()
-        if menu_render.too_small(height, columns):
+        if menu_render.too_small(height, full_width):
             menu_curses.put(screen, 0, 0, menu_render.fit("too small", max(columns, 1)))
             rendered = []
         elif not snapshot:
@@ -88,8 +91,13 @@ def run(screen):
         else:
             selected, collapsed = menu_render.move(snapshot, collapsed, selected, "stay")
             rendered = menu_render.rows(snapshot, columns, collapsed, glyphs, frame // 2)
+            pinned = [row for row in rendered if not row["key"]]
+            room = height - 1 - len(pinned)
+            top = menu_render.scroll_top(rendered, selected, room, top)
+            on_screen = pinned + rendered[len(pinned) + top:len(pinned) + top + max(room, 0)]
+            rendered = on_screen               # from here on, row y on screen is rendered[y]: clicks map right
             cursor_row = 0
-            for y, row in enumerate(rendered[:height - 1]):
+            for y, row in enumerate(on_screen):
                 attr = {"header": curses.A_BOLD, "retired": curses.A_DIM}.get(row["style"], 0)
                 if row["style"] == "error":
                     attr = menu_curses.look("auth", colour)
@@ -100,7 +108,7 @@ def run(screen):
                 if row["mark"] and not chosen and row["style"] == "row":
                     start = menu_render.width(row["text"]) - menu_render.width(row["mark"])
                     menu_curses.put(screen, y, start, row["mark"], menu_curses.look(row["look"], colour))
-            menu_curses.put(screen, height - 1, 0, menu_render.footer(columns, note or poller.failure), curses.A_DIM)
+            menu_curses.put(screen, height - 1, 0, menu_render.footer(columns, note, glyphs), curses.A_DIM)
             screen.move(cursor_row, 0)  # keep the cursor on the selection: screen readers follow it
         screen.noutrefresh()
         curses.doupdate()
@@ -152,6 +160,10 @@ def main(argv):
         for row in menu_render.rows(agent_state.collect(), args.columns, glyphs=menu_style.glyphs()):
             print(row["text"])
         return 0
+    if not menu_curses.usable_terminal() or not sys.stdout.isatty():
+        print("agent-menu: this needs a real terminal (TERM is dumb or output is not a terminal). --once prints the tree as text.",
+              file=sys.stderr)
+        return 2
     curses.wrapper(run)
     return 0
 

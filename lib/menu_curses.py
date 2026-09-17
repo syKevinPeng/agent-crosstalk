@@ -8,6 +8,13 @@ PAIRS = {"red": 1, "yellow": 2, "cyan": 3}
 ATTRS = {"bold": curses.A_BOLD, "dim": curses.A_DIM, "reverse": curses.A_REVERSE}
 
 
+def usable_terminal(environ=None):
+    """A full-screen program needs a terminal that can move the cursor. TERM=dumb cannot."""
+    import os
+    environ = os.environ if environ is None else environ
+    return environ.get("TERM", "") not in ("", "dumb", "unknown")
+
+
 def setup(screen):
     """Default background everywhere (-1), the terminal's own 16 colours only, a short Esc delay."""
     colour = False
@@ -35,6 +42,13 @@ def look(state, colour):
     if colour and name:
         value |= curses.color_pair(PAIRS[name])
     return value
+
+
+def cursor(visible):
+    try:
+        curses.curs_set(1 if visible else 0)
+    except curses.error:
+        pass  # a terminal such as TERM=dumb cannot hide the cursor. That is no reason to crash
 
 
 def put(screen, y, x, text, attr=0):

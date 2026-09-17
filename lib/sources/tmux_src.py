@@ -18,6 +18,14 @@ def _tmux(*args, timeout=1.5):
     return out.stdout
 
 
+def literal(text):
+    """Make `text` safe as a tmux argument that tmux would otherwise interpret. tmux expands
+    `#{...}` and runs `#(shell command)` in titles and window names, and a trailing `;` ends the
+    command. Names come from other agents, so they are never passed through unescaped."""
+    text = text.replace("#", "##")
+    return text[:-1] + "\\;" if text.endswith(";") else text
+
+
 def list_panes():
     """One dict per pane. Grouped sessions list each pane twice, so panes are keyed by `%id`."""
     panes = {}
@@ -48,7 +56,9 @@ def capture(pane_id):
 
 def send_text(pane_id, text):
     """Type `text` literally, then press Enter. `-l` stops tmux reading words as key names."""
-    _tmux("send-keys", "-t", pane_id, "-l", "--", text)
+    # -l types the text literally, with no key names and no formats. Only a trailing `;` still
+    # needs care: tmux would take it as a command separator and drop it.
+    _tmux("send-keys", "-t", pane_id, "-l", "--", text[:-1] + "\\;" if text.endswith(";") else text)
     _tmux("send-keys", "-t", pane_id, "Enter")
 
 
@@ -59,14 +69,19 @@ def focus(pane_id):
 
 def popup(command, width=100, height=26, title=""):
     """tmux draws the border and the title, so the program inside draws none of its own."""
-    args = ["display-popup", "-E", "-w", str(width), "-h", str(height), "-b", "rounded"]
+    try:
+        client = _tmux("display-message", "-p", "#{client_width} #{client_height}").split()
+        width, height = min(width, int(client[0]) - 2), min(height, int(client[1]) - 2)
+    except (SourceError, ValueError, IndexError):
+        pass  # keep the wanted size; tmux says so if it cannot fit
+    args = ["display-popup", "-E", "-w", str(max(width, 20)), "-h", str(max(height, 8)), "-b", "rounded"]
     if title:
-        args += ["-T", title]
+        args += ["-T", literal(title)]
     _tmux(*args, command, timeout=None)
 
 
 def new_window(name, command):
-    _tmux("new-window", "-n", name, command)
+    _tmux("new-window", "-n", literal(name), command)
 
 
 def descendants(root_pid):

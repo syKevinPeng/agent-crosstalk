@@ -1,18 +1,24 @@
 """Tests for lib/menu_actions.py against the stub tmux. They assert the exact keys sent,
 and that nothing is sent when a safety rule says no."""
+import json
 import os
+import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from menu_fixtures import LIB, Machine
+from menu_fixtures import LIB, FakeCodexDaemon, Machine
 
 sys.path.insert(0, str(LIB))
 import agent_state  # noqa: E402
 import menu_actions  # noqa: E402
+from sources import tmux_src  # noqa: E402
+
+THREAD = "0c0c0c0c-0000-7000-8000-00000000abcd"
 
 
 class MenuActionsTest(unittest.TestCase):
@@ -23,48 +29,92 @@ class MenuActionsTest(unittest.TestCase):
         patcher = mock.patch.dict(os.environ, self.m.env, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.m.pane(7, 700, "codex", "builder", screen="› Ask Codex to do anything\n")
+        self.m.pane(7, 700, "codex", "builder | proj", screen="› Ask Codex to do anything\n")
         self.agent = agent_state.Agent(key="codex:t1", kind="codex", name="builder", session_id="t1",
                                        pane_id="%7", pane_pid=700)
 
-    def sent(self):
-        return [c for c in self.m.tmux_calls() if c.startswith("send-keys")]
+    def acted(self):
+        """tmux calls that change something, as opposed to reading."""
+        return [c for c in self.m.tmux_calls() if not c.startswith(("list-panes", "capture-pane", "display-message"))]
 
-    def test_instruction_is_typed_literally_then_enter_and_logged(self):
+    def test_instruction_is_typed_literally_then_enter_with_attempt_logged_first(self):
         self.assertEqual(menu_actions.instruct(self.agent, "  Enter the review now  "), "typed into its pane")
-        self.assertEqual(self.sent(), ["send-keys -t %7 -l -- Enter the review now", "send-keys -t %7 Enter"])
-        (line,) = self.m.actions()
-        self.assertEqual((line["action"], line["result"], line["instruction"], line["agent_name"]),
-                         ("instruct", "typed into pane", "Enter the review now", "builder"))
+        self.assertEqual(self.acted(), ["send-keys -t %7 -l -- Enter the review now", "send-keys -t %7 Enter"])
+        attempt, result = self.m.actions()
+        self.assertEqual((attempt["action"], attempt["result"], attempt["instruction"]),
+                         ("instruct", "attempt", "Enter the review now"))
+        self.assertEqual((result["action"], result["result"], result["agent_name"]),
+                         ("instruct", "typed into pane", "builder"))
 
-    def test_an_auth_prompt_blocks_typing_and_logs_only_the_label(self):
-        (self.m.dir / "screen-7.txt").write_text("Cloning...\nPassword: ")
-        with self.assertRaises(menu_actions.Refused):
-            menu_actions.instruct(self.agent, "hunter2")
-        self.assertEqual(self.sent(), [])
-        (line,) = self.m.actions()
-        self.assertEqual((line["action"], line["request_text"]), ("refused", "password"))
-        self.assertNotIn("hunter2", (self.m.dir / "menu-actions.jsonl").read_text())
-
-    def test_a_pane_that_now_runs_something_else_gets_no_keys(self):
-        (self.m.dir / "pid-7.txt").write_text("999\n")
-        with self.assertRaises(menu_actions.Refused):
-            menu_actions.instruct(self.agent, "hello")
-        (self.m.dir / "pid-7.txt").unlink()            # the pane is gone altogether
-        with self.assertRaises(menu_actions.Refused):
-            menu_actions.open_pane(self.agent)
-        self.assertEqual(self.sent(), [])
-        self.assertFalse(any(c.startswith("select-") for c in self.m.tmux_calls()))
-
-    def test_an_unwritable_log_refuses_the_action(self):
+    def test_the_attempt_line_must_be_written_or_nothing_happens(self):
         blocked = Path(self._tmp.name) / "a-folder"
         blocked.mkdir()
+        far = agent_state.Agent(key="claude:s", kind="claude", name="far", session_id="s",
+                                short_id="abcdef12", background=True)
+        spawned = agent_state.Agent(key="codex:t9", kind="codex", name="kid", session_id="t9", spawned=True)
         with mock.patch.dict(os.environ, {"AGENT_MENU_ACTIONS_LOG": str(blocked)}):
             for action in (lambda: menu_actions.instruct(self.agent, "hello"),
-                           lambda: menu_actions.open_pane(self.agent)):
+                           lambda: menu_actions.open_pane(self.agent),
+                           lambda: menu_actions.attach(far),
+                           lambda: menu_actions.retire(spawned)):
                 with self.assertRaises(menu_actions.Refused):
                     action()
-        self.assertEqual([c for c in self.m.tmux_calls() if not c.startswith(("list-", "capture-", "display-"))], [])
+        self.assertEqual(self.acted(), [])
+
+    def test_a_failing_result_line_does_not_undo_or_crash_the_action(self):
+        real_log, calls = menu_actions._log, []
+
+        def flaky(agent, action, result, **extra):
+            calls.append(result)
+            if result != "attempt":
+                raise OSError(28, "No space left on device")
+            return real_log(agent, action, result, **extra)
+        with mock.patch.object(menu_actions, "_log", flaky):
+            self.assertEqual(menu_actions.instruct(self.agent, "hello"), "typed into its pane")
+        self.assertEqual(calls, ["attempt", "typed into pane"])
+        self.assertEqual([a["result"] for a in self.m.actions()], ["attempt"])     # the record exists
+
+    def test_an_auth_prompt_blocks_typing_and_logs_only_the_label(self):
+        (self.m.dir / "screen-7.txt").write_text("Cloning...\n  ⎿  Password for 'https://u@host': \n──\n❯ \n──\n  footer\n")
+        with self.assertRaises(menu_actions.Refused):
+            menu_actions.instruct(self.agent, "hunter2")
+        self.assertEqual(self.acted(), [])
+        (line,) = self.m.actions()
+        self.assertEqual((line["action"], line["request_text"]), ("refused", "password"))
+        log_text = (self.m.dir / "menu-actions.jsonl").read_text()
+        self.assertNotIn("hunter2", log_text)
+        self.assertNotIn("https://u@host", log_text)
+
+    def test_a_pane_is_refused_when_its_pid_or_its_foreground_program_changed(self):
+        self.m.panes = [(7, 999, "codex", "builder | proj")]                  # another process owns the pane
+        self.m.write()
+        with self.assertRaises(menu_actions.Refused):
+            menu_actions.instruct(self.agent, "hello")
+        self.m.panes = [(7, 700, "bash", "builder | proj")]                   # codex exited, its shell kept the pid
+        self.m.write()
+        for action in (lambda: menu_actions.instruct(self.agent, "rm -rf build"), lambda: menu_actions.open_pane(self.agent)):
+            with self.assertRaises(menu_actions.Refused):
+                action()
+        self.m.panes = []                                                     # the pane is gone
+        self.m.write()
+        with self.assertRaises(menu_actions.Refused):
+            menu_actions.open_pane(self.agent)
+        self.assertEqual(self.acted(), [])
+        self.assertEqual(self.m.actions(), [])
+
+    def test_an_instruction_is_one_line_of_plain_text(self):
+        for text in ("first\nsecond", "tab\there", "esc\x1b[2J", "bell\x07"):
+            with self.subTest(text=text):
+                with self.assertRaises(menu_actions.Refused):
+                    menu_actions.instruct(self.agent, text)
+        self.assertEqual(self.acted(), [])
+        self.assertEqual(menu_actions.instruct(self.agent, "-rf $(id) `id` #{pane_pid} ünï"), "typed into its pane")
+        self.assertIn("send-keys -t %7 -l -- -rf $(id) `id` #{pane_pid} ünï", self.acted())
+
+    def test_a_trailing_semicolon_survives(self):
+        menu_actions.instruct(self.agent, "run tests; then stop;")
+        self.assertIn("send-keys -t %7 -l -- run tests; then stop\;", self.acted())
+        self.assertEqual(self.m.actions()[0]["instruction"], "run tests; then stop;")
 
     def test_a_headless_codex_gets_plain_owner_input_with_no_teammate_header(self):
         argv_file = self.m.dir / "codex-argv.txt"
@@ -75,25 +125,79 @@ class MenuActionsTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_BIN": str(stub)}):
             self.assertEqual(menu_actions.instruct(headless, "Please retry the push"), "queued for it")
         self.assertEqual(argv_file.read_text().splitlines(), ["queue", "--thread", "t2", "--message", "Please retry the push"])
-        self.assertNotIn("Teammate message", argv_file.read_text())
+        self.assertEqual([a["result"] for a in self.m.actions()], ["attempt", "queued"])
 
-    def test_a_claude_session_with_no_pane_takes_no_instruction(self):
-        far = agent_state.Agent(key="claude:s", kind="claude", name="far", session_id="s", short_id="ssssssss")
+    def test_attach_is_for_a_background_claude_with_no_pane_and_a_plain_id(self):
+        def claude(**kw):
+            base = dict(key="claude:s", kind="claude", name="far; away #(touch x)", session_id="s",
+                        short_id="abcdef12", background=True)
+            return agent_state.Agent(**dict(base, **kw))
         with self.assertRaises(menu_actions.Refused):
-            menu_actions.instruct(far, "hello")
-        self.assertEqual(menu_actions.attach(far), "opened in a new window")
-        self.assertTrue(any(c.startswith("new-window -n far ") and c.endswith("attach ssssssss")
-                            for c in self.m.tmux_calls()))
+            menu_actions.instruct(claude(), "hello")                          # no pane: no typing
+        for bad in (claude(kind="codex"), claude(background=False), claude(pane_id="%3"),
+                    claude(short_id="abc; rm -rf ~"), claude(short_id="")):
+            with self.assertRaises(menu_actions.Refused):
+                menu_actions.attach(bad)
+        self.assertEqual(self.acted(), [])
+        self.assertEqual(menu_actions.attach(claude()), "opened in a new window")
+        (call,) = self.acted()
+        self.assertTrue(call.startswith("new-window -n far; away ##(touch x) "), call)   # `#` is doubled for tmux
+        self.assertTrue(call.endswith(" attach abcdef12"), call)
 
-    def test_only_a_spawned_agent_can_be_retired(self):
-        with self.assertRaises(menu_actions.Refused):
-            menu_actions.retire(self.agent)
+    def test_only_a_live_spawned_agent_can_be_retired(self):
+        for agent in (self.agent, agent_state.Agent(key="codex:x", kind="codex", name="x", session_id="x",
+                                                    spawned=True, retired=True)):
+            with self.assertRaises(menu_actions.Refused):
+                menu_actions.retire(agent)
         self.assertEqual(self.m.actions(), [])
+
+    def test_retire_runs_retire_peer_and_logs_both_lines(self):
+        daemon = FakeCodexDaemon(self.m.sock)
+        daemon.threads[THREAD] = {"id": THREAD, "name": "kid", "cwd": "/w"}
+        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "kid", "id": THREAD,
+                                     "cwd": "/w", "access": "read-only", "spawned_by": "claude/x"})
+        kid = agent_state.Agent(key=f"codex:{THREAD}", kind="codex", name="kid", session_id=THREAD, spawned=True)
+        self.assertEqual(menu_actions.retire(kid), "retired")
+        self.assertEqual(daemon.params("thread/archive"), [{"threadId": THREAD}])
+        self.assertEqual([a["result"] for a in self.m.actions()], ["attempt", "retired"])
 
     def test_open_pane_focuses_and_logs(self):
         self.assertEqual(menu_actions.open_pane(self.agent), "pane focused")
-        self.assertIn("select-pane -t %7", self.m.tmux_calls())
-        self.assertEqual(self.m.actions()[0]["action"], "open_pane")
+        self.assertEqual(self.acted(), ["select-window -t %7", "select-pane -t %7"])
+        self.assertEqual([a["result"] for a in self.m.actions()], ["attempt", "focused"])
+
+
+@unittest.skipUnless(shutil.which("tmux"), "needs a real tmux")
+class RealTmuxFormatTest(unittest.TestCase):
+    """tmux expands #{...} and runs #(shell) in a popup title and a window name. Session names are
+    chosen by other agents, so this runs a real private tmux server to prove a name cannot run code."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="rt")
+        self.addCleanup(self._tmp.cleanup)
+        self.socket = f"agentmenu-test-{os.getpid()}"
+        self.tmux = ["tmux", "-L", self.socket, "-f", "/dev/null"]
+        subprocess.run(self.tmux + ["new-session", "-d", "-s", "t", "-x", "80", "-y", "24", "sleep 60"], check=True)
+        self.addCleanup(lambda: subprocess.run(self.tmux + ["kill-server"], capture_output=True))
+        wrapper = Path(self._tmp.name) / "tmux-private"
+        wrapper.write_text(f"#!/usr/bin/env bash\nexec tmux -L {self.socket} -f /dev/null \"$@\"\n")
+        wrapper.chmod(0o755)
+        patcher = mock.patch.dict(os.environ, {"TMUX_BIN": str(wrapper)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_hostile_name_is_shown_as_text_and_runs_nothing(self):
+        marker = Path(self._tmp.name) / "pwned"
+        hostile = f"#(touch {marker}) #{{pane_pid}};"
+        tmux_src.new_window(hostile, "sleep 30")
+        names = subprocess.run(self.tmux + ["list-windows", "-a", "-F", "#{window_name}"],
+                               capture_output=True, text=True).stdout
+        self.assertIn("#(touch", names)                  # kept as literal text
+        self.assertIn("#{pane_pid}", names)              # not expanded to a number
+        import time
+        time.sleep(1.2)                                  # a #() job would have run by now
+        self.assertFalse(marker.exists(), "the window name ran a shell command")
+        self.assertEqual(tmux_src.literal("a#b;"), "a##b\;")
 
 
 if __name__ == "__main__":

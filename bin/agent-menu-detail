@@ -16,12 +16,16 @@ import auth_readers  # noqa: E402
 import menu_actions  # noqa: E402
 import menu_curses  # noqa: E402
 import menu_detail  # noqa: E402
+import menu_popup  # noqa: E402
 import menu_render  # noqa: E402
 import menu_style  # noqa: E402
 from sources import logs_src  # noqa: E402
+from sources.base import SourceError  # noqa: E402
 
-KEYS = {"Open pane": "o", "Attach": "t", "Send": "i", "Retire": "r"}
 RELOAD_MS = 1500
+KEY_NAMES = {curses.KEY_ENTER: "enter", curses.KEY_BACKSPACE: "backspace", curses.KEY_BTAB: "backtab",
+             curses.KEY_LEFT: "left", curses.KEY_RIGHT: "right", curses.KEY_NPAGE: "pgdn", curses.KEY_PPAGE: "pgup"}
+CHAR_KEYS = {"\x1b": "esc", "\n": "enter", "\r": "enter", "\t": "tab", "\x7f": "backspace", "\x08": "backspace"}
 
 
 def load(key):
@@ -30,178 +34,148 @@ def load(key):
     if not agent:
         return None, "", [], ""
     parent = snapshot.by_key.get(agent.parent_key)
-    recent = logs_src.recent(agent.session_id, agent.name)
+    try:
+        recent = logs_src.recent(agent.session_id, agent.name)
+    except SourceError:
+        recent = []
     reply = ""
     if agent.kind == "codex" and not agent.pane_id:
-        done = subprocess.run([sys.executable, os.path.join(BIN, "codex-reply"), agent.session_id],
-                              capture_output=True, text=True, timeout=20)
-        reply = "\n".join(done.stdout.splitlines()[1:]).strip() if done.returncode in (0, 5) else ""
+        try:
+            done = subprocess.run([sys.executable, os.path.join(BIN, "codex-reply"), agent.session_id],
+                                  capture_output=True, text=True, timeout=20)
+            reply = "\n".join(done.stdout.splitlines()[1:]).strip() if done.returncode in (0, 5) else ""
+        except (OSError, subprocess.TimeoutExpired):
+            reply = ""
+        reply = agent_state.clean(reply.replace("\t", " ")).replace("?\n", "\n") if reply else ""
         agent.auth = agent.auth or (auth_readers.detect_output(reply) or "")
     return agent, (parent.name if parent else ""), recent, reply
 
 
 def act(agent, button, text):
-    """Returns (note for the owner, close the popup?)."""
+    """Returns (note for the owner, succeeded?, close the popup?)."""
     try:
         if button == "Open pane":
-            return menu_actions.open_pane(agent), True
+            return menu_actions.open_pane(agent), True, True
         if button == "Attach":
-            return menu_actions.attach(agent), True
+            return menu_actions.attach(agent), True, True
         if button == "Retire":
-            return menu_actions.retire(agent), False
+            return menu_actions.retire(agent), True, False
         if button == "Send":
-            return menu_actions.instruct(agent, text), False
+            return menu_actions.instruct(agent, text), True, False
     except menu_actions.Refused as refusal:
-        return f"not done: {refusal}", False
-    return "", False
+        return f"not done: {refusal}", False, False
+    except OSError as exc:
+        return f"not done: {type(exc).__name__}", False, False
+    return "", False, False
 
 
-def read_key(screen):
-    """(is_char, value): a typed character as str, or a curses key code as int. None on timeout.
-    Wide input keeps a typed character apart from a function key and keeps non-ASCII text whole."""
+def read_event(screen):
+    """One input event for menu_popup.step, or None on timeout, or "resize"."""
     try:
         got = screen.get_wch()
     except curses.error:
         return None
-    return (True, got) if isinstance(got, str) else (False, got)
+    if isinstance(got, str):
+        return ("key", CHAR_KEYS[got]) if got in CHAR_KEYS else ("char", got)
+    if got == curses.KEY_RESIZE:
+        return "resize"
+    if got == curses.KEY_MOUSE:
+        try:
+            _, x, y, _, _ = curses.getmouse()
+        except curses.error:
+            return None
+        return ("mouse", (x, y))
+    return ("key", KEY_NAMES.get(got, "other"))
 
 
 def run(screen, key):
     colour = menu_curses.setup(screen)
     glyphs = menu_style.glyphs()
     screen.timeout(RELOAD_MS)
-    typing, text, note, confirm, focus, scroll = False, "", "", "", 0, 0
-    while True:
-        agent, parent_name, recent, reply = load(key)
-        height, columns = screen.getmaxyx()
-        columns -= 1
+    state, note = menu_popup.State(), ""
+    loaded = load(key)
+    while not state.close:
+        agent, parent_name, recent, reply = loaded
+        height, width = screen.getmaxyx()
+        columns = width - 1
         screen.erase()
         if not agent:
             menu_curses.put(screen, 1, 2, "This agent is no longer listed. Press any key.")
             screen.noutrefresh()
             curses.doupdate()
             screen.timeout(-1)
-            screen.getch()
+            read_event(screen)
             return
-        if menu_render.too_small(height, columns):
+        offered, spots = menu_detail.buttons(agent), []
+        if menu_render.too_small(height, width) or height < 9:
             menu_curses.put(screen, 0, 0, "too small")
-            screen.noutrefresh()
-            curses.doupdate()
-            got = read_key(screen)
-            if got and got[0] and got[1] in ("\x1b", "q"):
-                return
-            continue
-
-        menu_curses.put(screen, 0, 2, menu_render.fit(menu_detail.title(agent, parent_name), columns - 4,
-                                                      glyphs["ellipsis"]), curses.A_DIM)
-        body = menu_detail.body(agent, recent, reply, columns - 4, glyphs)
-        room = height - 7                                   # title, gap, input, buttons, gap, footer
-        scroll = max(0, min(scroll, len(body) - room))
-        for y, (line, style) in enumerate(body[scroll:scroll + room]):
-            attr = {"head": curses.A_BOLD, "dim": curses.A_DIM}.get(style, 0)
-            if style == "warn":
-                attr = menu_curses.look("auth" if agent.auth else "needs", colour) & ~curses.A_REVERSE | curses.A_BOLD
-            menu_curses.put(screen, 2 + y, 2, line, attr)
-        if len(body) > room:
-            more = f"{scroll + 1}-{min(scroll + room, len(body))} of {len(body)}  PgUp PgDn"
-            menu_curses.put(screen, 1, columns - len(more) - 1, more, curses.A_DIM)
-
-        offered, spots, x = menu_detail.buttons(agent), [], 2
-        focus = min(focus, max(len(offered) - 1, 0))
-        for index, button in enumerate(offered):
-            label = f"[ {button} ]" if button == "Send" else f"[ {button} ({KEYS[button]}) ]"
-            attr = curses.A_REVERSE if (index == focus and not typing) or confirm == button else 0
-            menu_curses.put(screen, height - 3, x, label, attr | (curses.A_BOLD if index == 0 else 0))
-            spots.append((x, x + menu_render.width(label), button))
-            x += menu_render.width(label) + 2
-        field = columns - 6
-        if "Send" in offered:
-            shown = text[-(field - 1):] if menu_render.width(text) >= field else text   # scrolls sideways
-            menu_curses.put(screen, height - 5, 2, "> " + shown, 0 if typing or text else curses.A_DIM)
-            if not typing and not text:
-                menu_curses.put(screen, height - 5, 4, "press i to type an instruction", curses.A_DIM)
-        if confirm:
-            hint = f"press {KEYS[confirm]} or Enter again to {confirm.lower()} this agent · any other key cancels"
-        elif typing:
-            hint = "Enter send · Esc stop typing"
         else:
-            hint = "Tab next button · Enter press · i instruction · PgUp PgDn scroll · Esc close"
-        menu_curses.put(screen, height - 1, 2, menu_render.fit(note or hint, columns - 4, glyphs["ellipsis"]),
-                        curses.A_BOLD if note else curses.A_DIM)
-        curses.curs_set(1 if typing else 0)
-        if typing:
-            screen.move(height - 5, 4 + min(menu_render.width(text), field - 1))
+            menu_curses.put(screen, 0, 2, menu_render.fit(menu_detail.title(agent, parent_name), columns - 4,
+                                                          glyphs["ellipsis"]), curses.A_DIM)
+            body = menu_detail.body(agent, recent, reply, columns - 4, glyphs)
+            room = height - 7                               # title, gap, input, gap, buttons, gap, footer
+            top = max(0, min(state.scroll, len(body) - room))
+            for y, (line, style) in enumerate(body[top:top + room]):
+                attr = {"head": curses.A_BOLD, "dim": curses.A_DIM}.get(style, 0)
+                if style == "warn":
+                    attr = (menu_curses.look("auth" if agent.auth else "needs", colour) & ~curses.A_REVERSE) | curses.A_BOLD
+                menu_curses.put(screen, 2 + y, 2, line, attr)
+            if len(body) > room:
+                more = f"{top + 1}-{min(top + room, len(body))} of {len(body)}  PgUp PgDn"
+                menu_curses.put(screen, 1, max(columns - len(more) - 1, 2), more, curses.A_DIM)
+
+            labels = menu_detail.button_labels(offered, columns - 4)
+            x = 2
+            for index, (button, label) in enumerate(zip(offered, labels)):
+                lit = (index == state.focus and not state.typing) or state.confirm == button
+                menu_curses.put(screen, height - 3, x, label, curses.A_REVERSE if lit else 0)
+                spots.append((x, x + menu_render.width(label), button))
+                x += menu_render.width(label) + 2
+            field = columns - 6
+            if "Send" in offered:
+                shown = state.text[-(field - 1):] if menu_render.width(state.text) >= field else state.text
+                menu_curses.put(screen, height - 5, 2, "> " + shown)
+                if not state.typing and not state.text:
+                    menu_curses.put(screen, height - 5, 4, "press i to type an instruction", curses.A_DIM)
+            if state.confirm:
+                hint = f"press r or Enter again to {state.confirm.lower()} this agent · any other key cancels"
+            elif state.typing:
+                hint = "Enter send · Esc stop typing"
+            else:
+                hint = "Tab next button · Enter press · i instruction · PgUp PgDn scroll · Esc close"
+            menu_curses.put(screen, height - 1, 2, menu_render.fit(note or hint, columns - 4, glyphs["ellipsis"]),
+                            curses.A_BOLD if note else curses.A_DIM)
+            menu_curses.cursor(state.typing)
+            if state.typing:
+                screen.move(height - 5, 4 + min(menu_render.width(state.text), field - 1))
         screen.noutrefresh()
         curses.doupdate()
 
-        got = read_key(screen)
-        if got is None:
+        event = read_event(screen)
+        if event is None:
+            loaded = load(key)                              # reload only when idle, never per keystroke
             continue
-        is_char, value = got
-        char = value if is_char else ""
-        pressed = -1 if is_char else value
-        if pressed == curses.KEY_RESIZE:
+        if event == "resize":
             curses.update_lines_cols()
             continue
-        chosen = ""
-        if pressed == curses.KEY_MOUSE:
-            try:
-                _, mx, my, _, _ = curses.getmouse()
-            except curses.error:
+        if event[0] == "mouse":
+            x, y = event[1]
+            if y == height - 3:
+                event = ("click", next((b for start, end, b in spots if start <= x < end), ""))
+            elif y == height - 5:
+                event = ("click", "input")
+            else:
                 continue
-            if my == height - 3:
-                chosen = next((b for start, end, b in spots if start <= mx < end), "")
-            elif my == height - 5 and "Send" in offered:
-                typing = True
-                continue
-        elif typing:
-            if char == "\x1b":
-                typing = False
-            elif char in ("\n", "\r") or pressed == curses.KEY_ENTER:
-                chosen, typing = "Send", False
-            elif char in ("\x7f", "\x08") or pressed == curses.KEY_BACKSPACE:
-                text = text[:-1]
-            elif char and char.isprintable():
-                text += char
-            if not chosen:
-                note = ""
-                continue
-        elif char in ("\x1b", "q"):
-            return
-        elif pressed == curses.KEY_NPAGE:
-            scroll += room
-            continue
-        elif pressed == curses.KEY_PPAGE:
-            scroll -= room
-            continue
-        elif (char == "\t" or pressed == curses.KEY_RIGHT) and offered:
-            focus = (focus + 1) % len(offered)
-            continue
-        elif pressed in (curses.KEY_BTAB, curses.KEY_LEFT) and offered:
-            focus = (focus - 1) % len(offered)
-            continue
-        elif char == "i" and "Send" in offered:
-            typing, note = True, ""
-            continue
-        elif (char in ("\n", "\r") or pressed == curses.KEY_ENTER) and offered:
-            chosen = confirm or offered[focus]
-        else:
-            chosen = next((b for b, k in KEYS.items() if char == k and b in offered and b != "Send"), "")
+        note = ""
+        state, chosen = menu_popup.step(state, offered, event, page=max(height - 7, 1))
         if not chosen:
-            confirm, note = "", ""
             continue
-        if chosen == "Send" and not text.strip():
-            typing = True                                   # Enter on an empty Send starts typing
-            continue
-        if chosen == "Retire" and confirm != "Retire":
-            confirm, note = "Retire", ""                    # the only risky action, so the only one asked twice
-            continue
-        note, close = act(agent, chosen, text)
-        confirm = ""
-        if chosen == "Send" and not note.startswith("not done"):
-            text = ""
+        note, succeeded, close = act(agent, chosen, state.text)
+        state = menu_popup.after_action(state, chosen, succeeded)
+        curses.flushinp()                                   # the rest of a paste must not run as hotkeys
         if close:
             return
+        loaded = load(key)
 
 
 def main(argv):
@@ -221,6 +195,10 @@ def main(argv):
             print(line)
         print("buttons: " + ", ".join(menu_detail.buttons(agent)))
         return 0
+    if not menu_curses.usable_terminal() or not sys.stdout.isatty():
+        print("agent-menu-detail: this needs a real terminal (TERM is dumb or output is not a terminal). --print shows this agent as text.",
+              file=sys.stderr)
+        return 2
     curses.wrapper(run, args.key)
     return 0
 

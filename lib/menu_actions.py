@@ -1,9 +1,16 @@
-"""What the owner can do from the menu: instruct, open a pane, attach, retire. Every action is
-logged first-or-refused, and none of them has a command-line form: they run only inside the menu."""
+"""What the owner can do from the menu: instruct, open a pane, attach, retire.
+
+Each action writes an `attempt` line to the action log BEFORE it acts, and is refused if that line
+cannot be written. The result line follows. So an action can never happen without a record, even if
+the program dies halfway. None of the actions has a command-line form. That is a guard against
+accidents, not a security boundary: any program running as the owner can import this module, just as
+it can run `tmux send-keys` itself."""
 import datetime
 import fcntl
 import json
 import os
+import re
+import shlex
 import subprocess
 
 import auth_readers
@@ -21,13 +28,21 @@ def log_path():
     return os.environ.get("AGENT_MENU_ACTIONS_LOG") or os.path.join(ROOT, "log", "menu-actions.jsonl")
 
 
-def _check_log_writable():
+def _attempt(agent, action, **extra):
+    """Record the intent first. If that fails, the action does not happen."""
     try:
         os.makedirs(os.path.dirname(log_path()) or ".", exist_ok=True)
-        with open(log_path(), "a", encoding="utf-8"):
-            pass
+        _log(agent, action, "attempt", **extra)
     except OSError:
         raise Refused("the action log cannot be written, so nothing was done") from None
+
+
+def _result(agent, action, result, **extra):
+    """Record the outcome. The attempt line already exists, so a failure here loses detail, not the record."""
+    try:
+        _log(agent, action, result, **extra)
+    except OSError:
+        pass
 
 
 def _log(agent, action, result, **extra):
@@ -43,13 +58,16 @@ def _log(agent, action, result, **extra):
 
 
 def _same_pane(agent):
-    """The pane must still be the process we matched. tmux reuses nothing, but a closed pane must not
-    silently turn into keys for whatever comes next."""
+    """The pane must still hold the same first process AND still be running the agent's CLI in the
+    foreground. When a CLI exits, its shell keeps the pane and the pid, so the pid alone proves nothing."""
     try:
-        if tmux_src.pane_pid(agent.pane_id) != agent.pane_pid:
-            raise Refused("that pane now runs something else")
+        now = {p["pane_id"]: p for p in tmux_src.list_panes()}.get(agent.pane_id)
     except SourceError:
         raise Refused("that pane is gone") from None
+    if not now:
+        raise Refused("that pane is gone")
+    if now["pid"] != agent.pane_pid or now["command"] != agent.kind:
+        raise Refused("that pane now runs something else")
 
 
 def instruct(agent, text):
@@ -57,7 +75,8 @@ def instruct(agent, text):
     text = text.strip()
     if not text:
         raise Refused("the instruction is empty")
-    _check_log_writable()
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        raise Refused("an instruction is one line of plain text: no line breaks or control characters")
     if agent.pane_id:
         _same_pane(agent)
         try:
@@ -65,27 +84,29 @@ def instruct(agent, text):
         except SourceError:
             raise Refused("that pane could not be read") from None
         if label:
-            _log(agent, "refused", "auth prompt on screen", request_text=label)
+            _result(agent, "refused", "auth prompt on screen", request_text=label)
             raise Refused(f"that pane is asking for a credential ({label}). Open the pane and type it there")
+        _attempt(agent, "instruct", instruction=text)
         try:
             tmux_src.send_text(agent.pane_id, text)
         except SourceError as exc:
-            _log(agent, "instruct", "error", instruction=text, error=str(exc))
+            _result(agent, "instruct", "error", error=str(exc))
             raise Refused(str(exc)) from None
-        _log(agent, "instruct", "typed into pane", instruction=text)
+        _result(agent, "instruct", "typed into pane")
         return "typed into its pane"
     if agent.kind == "codex":
+        _attempt(agent, "instruct", instruction=text)
         binary = os.environ.get("CODEX_BIN") or "codex"
         try:
             done = subprocess.run([binary, "queue", "--thread", agent.session_id, "--message", text],
                                   capture_output=True, text=True, timeout=30)
         except (OSError, subprocess.TimeoutExpired) as exc:
-            _log(agent, "instruct", "error", instruction=text, error=type(exc).__name__)
+            _result(agent, "instruct", "error", error=type(exc).__name__)
             raise Refused(f"codex queue failed: {type(exc).__name__}") from None
         if done.returncode != 0:
-            _log(agent, "instruct", "error", instruction=text, error=done.stderr.strip()[-200:])
+            _result(agent, "instruct", "error", error=done.stderr.strip()[-200:])
             raise Refused("codex queue failed")
-        _log(agent, "instruct", "queued", instruction=text)
+        _result(agent, "instruct", "queued")
         return "queued for it"
     raise Refused("a Claude session with no pane takes input only in its own terminal. Use Attach")
 
@@ -93,38 +114,46 @@ def instruct(agent, text):
 def open_pane(agent):
     if not agent.pane_id:
         raise Refused("this agent has no pane")
-    _check_log_writable()
     _same_pane(agent)
+    _attempt(agent, "open_pane", request_text=agent.auth or None)
     try:
         tmux_src.focus(agent.pane_id)
     except SourceError as exc:
+        _result(agent, "open_pane", "error", error=str(exc))
         raise Refused(str(exc)) from None
-    _log(agent, "open_pane", "focused", request_text=agent.auth or None)
+    _result(agent, "open_pane", "focused")
     return "pane focused"
 
 
 def attach(agent):
-    if agent.kind != "claude" or not agent.short_id:
-        raise Refused("only a background Claude session can be attached")
-    _check_log_writable()
+    if agent.kind != "claude" or not agent.background or agent.pane_id:
+        raise Refused("only a background Claude session with no pane can be attached")
+    if not re.fullmatch(r"[0-9a-f]{6,32}", agent.short_id or ""):
+        raise Refused("this session has no usable id")  # the id goes into a command line
+    _attempt(agent, "attach")
     binary = os.environ.get("CLAUDE_BIN") or "claude"
     try:
-        tmux_src.new_window(agent.name[:20], f"{binary} attach {agent.short_id}")
+        tmux_src.new_window(agent.name[:20], f"{shlex.quote(binary)} attach {agent.short_id}")
     except SourceError as exc:
+        _result(agent, "attach", "error", error=str(exc))
         raise Refused(str(exc)) from None
-    _log(agent, "attach", "opened in a new window")
+    _result(agent, "attach", "opened in a new window")
     return "opened in a new window"
 
 
 def retire(agent):
-    if not agent.spawned:
-        raise Refused("only an agent that spawn-peer created can be retired from here")
-    _check_log_writable()
+    if not agent.spawned or agent.retired:
+        raise Refused("only a live agent that spawn-peer created can be retired from here")
+    _attempt(agent, "retire")
     agent_id = agent.session_id if agent.kind == "codex" else agent.short_id
-    done = subprocess.run([os.path.join(ROOT, "bin", "retire-peer"), agent_id, "owner/agent-menu"],
-                          capture_output=True, text=True, timeout=150)
+    try:
+        done = subprocess.run([os.path.join(ROOT, "bin", "retire-peer"), agent_id, "owner/agent-menu"],
+                              capture_output=True, text=True, timeout=150)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _result(agent, "retire", "error", error=type(exc).__name__)
+        raise Refused(f"retire-peer failed: {type(exc).__name__}") from None
     if done.returncode != 0:
-        _log(agent, "retire", "error", error=done.stderr.strip()[-200:])
+        _result(agent, "retire", "error", error=done.stderr.strip()[-200:])
         raise Refused(done.stderr.strip().splitlines()[-1] if done.stderr.strip() else "retire-peer failed")
-    _log(agent, "retire", "retired")
+    _result(agent, "retire", "retired")
     return "retired"

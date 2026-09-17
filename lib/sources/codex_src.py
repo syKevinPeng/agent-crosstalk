@@ -26,7 +26,7 @@ def list_threads(extra_ids=(), timeout=1.5):
     except CodexError as exc:
         raise SourceError(f"codex: {exc}") from None
     try:
-        listing = ws.rpc("thread/list", {"limit": 50}).get("data", [])
+        listing = ws.rpc("thread/list", {"limit": 200}).get("data", [])
         threads = {t["id"]: _thread(t) for t in listing if isinstance(t, dict) and t.get("id")}
         for thread_id in extra_ids:
             if thread_id in threads:

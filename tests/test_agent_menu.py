@@ -114,14 +114,120 @@ class AgentMenuTest(unittest.TestCase):
         self.assertTrue(any("pusher" in l and l.endswith("claude ✗") for l in lines), lines)
         text = self.detail(f"claude:{CLAUDE_A}").stdout
         self.assertIn("ssh key passphrase", text)
-        self.assertIn("buttons: Open pane\n", text)       # no Send
+        self.assertTrue(text.endswith("buttons: Open pane\n"), text)       # no Send
         self.assertNotIn("id_ed25519", text)               # the screen itself is never shown
 
-    def test_a_doubtful_pane_match_means_no_pane(self):
+    def buttons(self, key):
+        return self.detail(key).stdout.strip().splitlines()[-1]
+
+    def test_two_panes_for_one_agent_means_no_pane(self):
         self.codex_thread(CODEX_P, "twin")
-        self.m.pane(1, 100, "codex", "twin")
-        self.m.pane(2, 200, "codex", "twin")
-        self.assertIn("buttons: Send", self.detail(f"codex:{CODEX_P}").stdout)   # queued, never typed into a guess
+        self.m.pane(1, 100, "codex", "twin | proj")
+        self.m.pane(2, 200, "codex", "twin | proj")
+        self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send")     # queued, never typed into a guess
+
+    def test_a_codex_thread_matches_its_name_segment_only_never_the_project(self):
+        self.codex_thread(CODEX_P, "proj")            # named like the project folder of another agent's pane
+        self.codex_thread(CODEX_C, "builder", status="active")
+        self.m.pane(7, 700, "codex", "⠏ builder | proj")
+        self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send")
+        self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Open pane, Send")
+        self.m.panes = []
+        self.m.pane(8, 800, "codex", "[ . ] Action Required | builder | proj")      # a status segment in front
+        self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Open pane, Send")
+        self.m.panes = []
+        self.m.pane(9, 900, "codex", "my builder | proj")                           # a substring is not a match
+        self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Send")
+
+    def test_a_pane_claimed_by_two_agents_goes_to_neither_and_a_stopped_thread_claims_nothing(self):
+        self.codex_thread(CODEX_P, "builder", status="active")
+        self.codex_thread(CODEX_C, "builder", status="notLoaded")                  # an old thread, same name
+        self.m.pane(7, 700, "codex", "builder | proj")
+        self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Open pane, Send")   # the live one keeps its pane
+        self.daemon.threads[CODEX_C]["status"] = {"type": "idle"}                  # now two live agents fit one pane
+        self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send")
+        self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Send")
+
+    def test_the_pane_must_run_the_agents_own_cli(self):
+        self.codex_thread(CODEX_P, "builder")
+        self.m.pane(7, 700, "bash", "builder | proj")                              # any program can set a title
+        self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send")
+
+    def test_a_claude_pane_is_matched_through_its_status_glyph(self):
+        self.m.claude_session(CLAUDE_A, "lead session", 500, status="busy")
+        self.m.pane(4, 400, "claude", "✳ lead session")
+        self.assertEqual(self.buttons(f"claude:{CLAUDE_A}"), "buttons: Open pane, Send")
+
+    def test_a_hostile_session_name_is_neutralised_everywhere(self):
+        self.m.claude_session(CLAUDE_A, "evil\x1b]0;title\x07\x1b[2Jname\nsecond\tline", 500)
+        lines = self.tree()
+        text = "\n".join(lines) + self.detail(f"claude:{CLAUDE_A}").stdout
+        for bad in ("\x1b", "\x07", "\t"):
+            self.assertNotIn(bad, text)
+        row = next(l for l in lines if "evil" in l)
+        self.assertTrue(row.endswith("claude ✓"), row)                             # the mark stays in its column
+        self.assertLessEqual(len(row), 34)
+
+    def test_a_label_without_a_kind_or_id_gives_no_parent(self):
+        self.m.claude_session(CLAUDE_A, "owner main", 500)
+        self.codex_thread(CODEX_P, "kid-one")
+        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "kid-one", "id": CODEX_P,
+                                     "access": "read-only", "spawned_by": "Owner_MAIN"})
+        lines = self.tree()
+        self.assertTrue(any(l.startswith("   owner main") for l in lines), lines)   # a leaf: nothing hung on it
+        self.assertTrue(any(l.startswith("   kid-one") for l in lines), lines)      # top level, still shown
+        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "kid-one", "id": CODEX_P,
+                                     "access": "read-only", "spawned_by": "claude/owner-main"})
+        self.assertTrue(any(l.startswith(" ▾ owner main") for l in self.tree()))    # with its kind, it links
+
+    def test_a_loop_in_the_records_hides_nobody(self):
+        self.codex_thread(CODEX_P, "kid-one")
+        self.codex_thread(CODEX_C, "kid-two")
+        self.m.log("spawned.jsonl",
+                   {"event": "spawned", "kind": "codex", "name": "kid-two", "id": CODEX_C, "access": "read-only",
+                    "spawned_by": "codex/kid-one"},
+                   {"event": "spawned", "kind": "codex", "name": "kid-one", "id": CODEX_P, "access": "read-only",
+                    "spawned_by": "codex/kid-two"})
+        lines = self.tree()
+        for name in ("kid-one", "kid-two"):
+            self.assertEqual(sum(name in l for l in lines), 1, lines)
+
+    def test_a_deeply_nested_agent_is_drawn_and_counted(self):
+        ids = [f"0f0f0f0f-0000-7000-8000-00000000000{i}" for i in range(4)]
+        for i, thread_id in enumerate(ids):
+            self.codex_thread(thread_id, f"level{i}")
+            if i:
+                self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": f"level{i}", "id": thread_id,
+                                             "access": "read-only", "spawned_by": f"codex/level{i - 1}"})
+        self.m.log("messages.jsonl", {"channel": "codex queue", "thread_uuid": ids[3], "msg_id": "m1",
+                                      "result": "queued", "first_line": "x"})
+        lines = self.tree(columns=40)
+        self.assertEqual(lines[0], " AGENTS  1 unanswered")
+        self.assertTrue(any("level3" in l and l.endswith("✉1") for l in lines), lines)
+
+    def test_an_unreadable_or_damaged_log_is_an_error_line_not_a_crash(self):
+        self.m.claude_session(CLAUDE_A, "reviewer", 500)
+        (self.m.dir / "spawned.jsonl").mkdir()                                     # cannot be read as a file
+        (self.m.dir / "messages.jsonl").write_bytes(b'\xff\xfe not utf-8\n{"channel": "x"}\n')
+        lines = self.tree()
+        self.assertIn(" spawn log: unreadable", lines)
+        self.assertTrue(any("reviewer" in l for l in lines), lines)
+
+    def test_a_retire_time_in_the_future_does_not_keep_a_row_forever(self):
+        self.codex_thread(CODEX_C, "time-traveller", status="notLoaded")
+        self.m.log("spawned.jsonl",
+                   {"event": "spawned", "kind": "codex", "name": "time-traveller", "id": CODEX_C,
+                    "access": "read-only", "spawned_by": "claude/x"},
+                   {"event": "retired", "id": CODEX_C, "action": "archive", "time_utc": "2999-01-01T00:00:00Z"})
+        self.assertFalse(any("time-traveller" in l for l in self.tree()))
+
+    def test_a_retired_agent_offers_no_buttons(self):
+        self.codex_thread(CODEX_C, "just-done", status="notLoaded")
+        self.m.log("spawned.jsonl",
+                   {"event": "spawned", "kind": "codex", "name": "just-done", "id": CODEX_C, "access": "read-only",
+                    "spawned_by": "claude/x"},
+                   {"event": "retired", "id": CODEX_C, "action": "archive", "time_utc": stamp(1)})
+        self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons:")
 
     def test_a_background_claude_with_no_pane_offers_attach_only(self):
         self.m.claude_session(CLAUDE_B, "far away", 900)
@@ -178,10 +284,31 @@ class AgentMenuTest(unittest.TestCase):
         self.assertIn("NEEDS LOGIN", text)
         self.assertIn("ssh key rejected", text)
 
+    def test_popup_sentences_wrap_at_words_for_any_width(self):
+        sys.path.insert(0, str(BIN.parent / "lib"))
+        import agent_state
+        import menu_detail
+        waiting = agent_state.Agent(key="k", kind="claude", name="n", session_id="s", needs_owner=1, background=True)
+        locked = agent_state.Agent(key="k", kind="codex", name="n", session_id="s", auth="ssh key passphrase", pane_id="%1")
+        for agent in (waiting, locked):
+            for columns in (30, 56, 96):
+                lines = [text for text, _ in menu_detail.body(agent, [], "", columns)]
+                self.assertTrue(all(len(line) <= columns for line in lines), (columns, lines))
+                words = " ".join(lines).split()
+                self.assertIn("pane", words)                      # whole words survive: none is split
+
+    def test_without_a_real_terminal_the_programs_say_so_instead_of_hanging(self):
+        for tool, extra in (("agent-menu", []), ("agent-menu-detail", [f"claude:{CLAUDE_A}"])):
+            proc = subprocess.run([sys.executable, str(BIN / tool), *extra], env=dict(self.m.env, TERM="dumb"),
+                                  capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
+            self.assertEqual(proc.returncode, 2, proc.stderr)
+            self.assertIn("real terminal", proc.stderr)
+            self.assertNotIn("Traceback", proc.stderr)
+
     def test_refreshing_only_reads(self):
         self.m.claude_session(CLAUDE_A, "reviewer", 500)
         self.codex_thread(CODEX_P, "builder")
-        self.m.pane(7, 700, "codex", "builder")
+        self.m.pane(7, 700, "codex", "builder | proj")
         self.tree()
         self.assertTrue(set(self.daemon.methods()) <= {"initialize", "initialized", "thread/list", "thread/read"})
         verbs = {call.split()[0] for call in self.m.tmux_calls()}
