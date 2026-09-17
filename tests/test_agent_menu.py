@@ -192,16 +192,19 @@ class AgentMenuTest(unittest.TestCase):
         self.m.process(110, 100)
         self.m.process(120, 110)
         self.assertEqual(self.buttons(f"claude:{CLAUDE_B}"), "buttons: Attach")
+        self.assertEqual(self.buttons(f"claude:{CLAUDE_A}"), "buttons: Open pane, Send")   # the real one keeps it
 
-    def test_a_live_session_that_runs_in_no_pane_takes_nobody_elses(self):
-        self.m.claude_session(CLAUDE_A, "lead", 900, cwd="/w")            # alive, but under no pane
-        self.m.pane(1, 100, "claude", "lead")                             # an unlisted session shows this title
-        self.m.process(900, 1)
+    def test_a_detached_session_gets_no_pane_whatever_a_title_says(self):
+        """A background session is detached and runs in no pane. Claude Code also rewrites its pane
+        title with live status, so a title is never taken as proof for a Claude session."""
+        self.m.claude_session(CLAUDE_A, "lead", 900, cwd="/w")
+        self.m.pane(1, 100, "claude", "lead")                             # the title names it, and is ignored
+        self.m.process(900, 1)                                            # detached, not under the pane
         self.assertEqual(self.buttons(f"claude:{CLAUDE_A}"), "buttons: Attach")
 
-    def test_a_claude_pane_is_matched_through_its_status_glyph(self):
+    def test_a_claude_pane_is_matched_by_process_even_when_the_title_is_a_status_line(self):
         self.m.claude_session(CLAUDE_A, "lead session", 500, status="busy")
-        self.m.pane(4, 400, "claude", "✳ lead session")
+        self.m.pane(4, 400, "claude", "2 awaiting input · claude agents")
         self.m.process(500, 400)
         self.assertEqual(self.buttons(f"claude:{CLAUDE_A}"), "buttons: Open pane, Send")
 

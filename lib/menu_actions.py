@@ -74,6 +74,8 @@ def _same_pane(agent):
         # Same shell, same CLI, but the title names another session: the owner quit one and started another.
         raise Refused("that pane now shows a different session")
     if agent.kind == "claude" and agent.pid:
+        if not tmux_src.alive(agent.pid):
+            raise Refused("that session's process is gone")
         owner = agent_state.pane_for_pid(agent.pid, panes)
         if not owner or owner["pane_id"] != agent.pane_id:
             raise Refused("that session no longer runs in that pane")

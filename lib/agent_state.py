@@ -57,17 +57,26 @@ def title_names(kind, title):
     return {clean(name) for name in names if name}
 
 
-def pane_for_pid(pid, panes, blocking_pids=()):
-    """The pane a process runs in: walk up from it to the first tmux pane. `blocking_pids` are other
-    sessions; if one sits between, this process is running inside THAT session, not in the pane, so
-    it gets no pane. One agent's Bash tool starting another agent must not hand over its pane."""
+def pane_for_pid(pid, panes):
+    """The pane a process runs in: walk up from it to the first tmux pane, or None."""
     by_pid = {pane["pid"]: pane for pane in panes}
-    for step, (walked, command) in enumerate(tmux_src.ancestors(pid)):
+    for walked, _ in tmux_src.ancestors(pid):
         if walked in by_pid:
             return by_pid[walked]
-        if step and walked in blocking_pids:
-            return None
     return None
+
+
+def sessions_between(pid, pane_pid, session_pids):
+    """True when another session's process sits between this one and its pane. That happens two ways:
+    the owner attached a background session from inside another session, which is fine and the pane
+    title then names the attached one; or an agent's Bash tool started a second agent, where the
+    title still names the parent. The title is what tells them apart."""
+    for walked, _ in tmux_src.ancestors(pid):
+        if walked == pane_pid:
+            return False
+        if walked != pid and walked in session_pids:
+            return True
+    return False
 
 
 def _match_panes(agents, panes):
@@ -78,16 +87,27 @@ def _match_panes(agents, panes):
     for agent in agents:
         if agent.state == "stopped":
             continue  # a thread that is not running cannot be what a live pane shows
-        by_title = [pane for pane in panes
-                    if pane["command"] == agent.kind and agent.name in title_names(agent.kind, pane["title"])]
-        if agent.kind == "claude" and tmux_src.alive(agent.pid):
-            owner = pane_for_pid(agent.pid, panes, session_pids)     # a live process: its own pane or none
-            fits = [owner] if owner and owner["command"] == agent.kind else []
+        if agent.kind == "claude":
+            # Claude Code rewrites its pane title with live status ("2 awaiting input · claude
+            # agents"), so a title is not an identifier. Only the process tells the truth: walk up
+            # from the session to its pane. A background session is detached under init and runs in
+            # no pane at all, so it gets none, and the popup offers Attach instead.
+            owner = pane_for_pid(agent.pid, panes) if tmux_src.alive(agent.pid) else None
+            fits = [owner] if owner and owner["command"] == "claude" else []
+            if fits and sessions_between(agent.pid, owner["pid"], session_pids):
+                fits = []                       # it runs inside another session, whose pane that is
         else:
-            fits = by_title
+            # Codex puts the thread name in its pane title and gives no process id to walk.
+            fits = [pane for pane in panes if pane["command"] == agent.kind
+                    and agent.name in title_names(agent.kind, pane["title"])]
         if len(fits) == 1:
             claims.setdefault(fits[0]["pane_id"], []).append((agent, fits[0]))
     for claimants in claims.values():
+        if len(claimants) > 1:
+            # An attached session shares its process chain with the session that attached it. The
+            # pane shows one of them, and its title says which. Naming exactly one settles it.
+            named = [(a, p) for a, p in claimants if a.name in title_names(a.kind, p["title"])]
+            claimants = named if len(named) == 1 else []
         if len(claimants) == 1:
             agent, pane = claimants[0]
             agent.pane_id, agent.pane_pid, agent._title = pane["pane_id"], pane["pid"], pane["title"]
