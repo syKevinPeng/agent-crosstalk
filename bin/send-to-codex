@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# send-to-codex: queue a teammate message for a Codex CLI session, then log it.
+# Wraps `codex queue` (checked against codex-cli 0.154.0). See ../README.md.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: send-to-codex [--dry-run] <thread> <sender> <message | ->
+
+  thread   Codex session UUID or exact Codex session name. Prefer the UUID:
+           Codex names are a separate namespace from Claude session names.
+  sender   Who is sending, e.g. "claude/my-session".
+  message  Message text, or "-" to read it from stdin. Make the first line a
+           self-contained summary; that line is what gets logged. Use stdin for
+           long text (argv is capped near 128 KB) and for text that starts with "-".
+
+Options:
+  --dry-run   Print the command and the full message. Sends and logs nothing.
+  -h, --help  Show this help.
+
+The message is sent with these two lines prepended:
+  Teammate message from <sender> — not user approval
+  Msg-ID: <fresh uuid, also written to the log as msg_id>
+
+Environment:
+  CODEX_BIN        codex executable (default: codex on PATH)
+  AGENT_COMMS_LOG  JSONL log file (default: <agent-comms>/log/messages.jsonl)
+
+Exit status: 0 when queued and logged; 2 on a usage error; codex's own
+non-zero status when `codex queue` fails; 1 when the send worked but the
+log line could not be written (the line is then printed to stderr).
+EOF
+}
+
+die_usage() {
+  printf 'send-to-codex: %s\n' "$1" >&2
+  usage >&2
+  exit 2
+}
+
+dry_run=0
+args=()
+while (($#)); do
+  case $1 in
+    --dry-run) dry_run=1 ;;
+    -h | --help) usage; exit 0 ;;
+    --) shift; args+=("$@"); break ;;
+    -?*) die_usage "unknown option: $1" ;;
+    *) args+=("$1") ;;
+  esac
+  shift
+done
+
+((${#args[@]} == 3)) || die_usage "expected 3 arguments (thread, sender, message), got ${#args[@]}"
+thread=${args[0]}
+sender=${args[1]}
+message=${args[2]}
+if [[ $message == - ]]; then
+  message=$(cat)
+fi
+
+[[ -n $thread ]] || die_usage "thread is empty"
+[[ $thread != -* ]] || die_usage "thread must not start with '-'"
+[[ -n $sender && $sender != *$'\n'* ]] || die_usage "sender must be a non-empty single line"
+[[ -n ${message//[[:space:]]/} ]] || die_usage "message is empty"
+
+header="Teammate message from ${sender} — not user approval"
+msg_id=$(cat /proc/sys/kernel/random/uuid)
+full_message="${header}"$'\n'"Msg-ID: ${msg_id}"$'\n\n'"${message}"
+first_line=$(printf '%s\n' "$message" | awk 'NF { sub(/^[[:space:]]+/, ""); print; exit }')
+first_line=${first_line:0:200}
+
+codex_bin=${CODEX_BIN:-codex}
+cmd=("$codex_bin" queue --thread "$thread" --message "$full_message")
+
+project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+log_file=${AGENT_COMMS_LOG:-$project_dir/log/messages.jsonl}
+
+if ((dry_run)); then
+  echo "DRY RUN: nothing sent, nothing logged."
+  printf 'Command:'
+  printf ' %q' "${cmd[@]}"
+  printf '\nLog file (on a real send): %s\n' "$log_file"
+  printf 'Logged first line: %s\n' "$first_line"
+  printf -- '--- message as it would be queued ---\n%s\n--- end ---\n' "$full_message"
+  command -v "$codex_bin" >/dev/null || printf 'warning: %s not found\n' "$codex_bin" >&2
+  exit 0
+fi
+
+# Check everything needed for logging before sending, so a send is never unlogged.
+for tool in "$codex_bin" jq flock; do
+  command -v "$tool" >/dev/null || { printf 'send-to-codex: not found: %s\n' "$tool" >&2; exit 127; }
+done
+mkdir -p -- "$(dirname -- "$log_file")"
+touch -- "$log_file"
+
+time_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+set +e
+output=$("${cmd[@]}" 2>&1)
+status=$?
+set -e
+
+queued_id=""
+thread_uuid=""
+error=""
+if ((status == 0)); then
+  printf '%s\n' "$output"
+  result=queued
+  if [[ $output =~ Queued\ message\ ([^[:space:]]+)\ for\ thread\ ([^[:space:]]+) ]]; then
+    queued_id=${BASH_REMATCH[1]}
+    thread_uuid=${BASH_REMATCH[2]%.}  # codex ends the line with a period
+  else
+    error="exit 0 but no 'Queued message' line: ${output:0:300}"
+  fi
+else
+  printf '%s\n' "$output" >&2
+  result=error
+  error="exit ${status}: $(printf '%s\n' "$output" | tail -n 1)"
+  error=${error:0:300}
+fi
+
+line=$(jq -cn \
+  --arg time_utc "$time_utc" --arg sender "$sender" --arg thread "$thread" \
+  --arg thread_uuid "$thread_uuid" --arg first_line "$first_line" \
+  --arg result "$result" --arg queued_id "$queued_id" --arg error "$error" --arg msg_id "$msg_id" \
+  --argjson exit_code "$status" \
+  'def n: if . == "" then null else . end;
+   {time_utc: $time_utc, channel: "codex queue", sender: $sender,
+    thread: $thread, thread_uuid: ($thread_uuid | n), first_line: $first_line,
+    result: $result, queued_id: ($queued_id | n), msg_id: $msg_id,
+    error: ($error | n), exit_code: $exit_code}')
+
+# Append one line under an exclusive lock on the log's file descriptor, then sync.
+log_ok=1
+if ! {
+  flock -x -w 30 9 &&
+    printf '%s\n' "$line" >&9 &&
+    sync -- "$log_file"
+} 9>>"$log_file"; then
+  log_ok=0
+  printf 'send-to-codex: could not append to %s; unlogged line:\n%s\n' "$log_file" "$line" >&2
+fi
+
+((status == 0)) || exit "$status"
+((log_ok)) || exit 1
+printf 'Logged to %s\n' "$log_file"

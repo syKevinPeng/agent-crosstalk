@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""codex-reply: print what a Codex agent said in its latest turn. Read-only.
+This is how the creator of a spawned Codex agent gets its answer: the agent needs no
+permission to reply, because nothing is sent. See ../README.md, "Creating and retiring agents"."""
+import argparse
+import os
+import sys
+
+BIN = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(BIN), "lib"))
+from codex_ws import CodexError, CodexWS  # noqa: E402
+
+EXIT_USAGE, EXIT_NOT_FOUND, EXIT_FAILED, EXIT_NOT_DONE = 2, 3, 4, 5
+FINISHED = ("completed", "failed", "interrupted")
+
+
+def status_of(obj):
+    status = obj.get("status")
+    return status.get("type") if isinstance(status, dict) else status
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(
+        prog="codex-reply", description="Print a Codex agent's messages from its latest turn. Changes nothing.",
+        epilog="Exit status: 0 printed; 2 usage error; 3 no such thread, or it has no turn yet; "
+               "4 the daemon could not be reached; 5 the latest turn is still running (what exists is printed).")
+    parser.add_argument("--all", action="store_true", help="include progress commentary, not only the final answer")
+    parser.add_argument("thread", help="the Codex thread id, as printed by spawn-peer")
+    args = parser.parse_args(argv)
+
+    try:
+        ws = CodexWS()
+        try:
+            thread = ws.rpc("thread/read", {"threadId": args.thread, "includeTurns": True}).get("thread")
+        finally:
+            ws.close()
+    except CodexError as exc:
+        missing = "not found" in str(exc).lower() or "no such" in str(exc).lower()
+        print(f"codex-reply: {exc}", file=sys.stderr)
+        return EXIT_NOT_FOUND if missing else EXIT_FAILED
+    turns = thread.get("turns") if isinstance(thread, dict) else None
+    if not turns:
+        print(f"codex-reply: thread {args.thread} has no turn yet", file=sys.stderr)
+        return EXIT_NOT_FOUND
+
+    turn = turns[-1]
+    state = status_of(turn) or "unknown"
+    messages = [i for i in turn.get("items", []) if isinstance(i, dict) and i.get("type") == "agentMessage"]
+    if not args.all:
+        final = [m for m in messages if m.get("phase") == "final_answer"]
+        messages = final or messages[-1:]
+    print(f"# thread {args.thread} ({thread.get('name') or 'unnamed'}), latest turn: {state}")
+    for message in messages:
+        print(message.get("text", ""))
+    return 0 if state in FINISHED else EXIT_NOT_DONE
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

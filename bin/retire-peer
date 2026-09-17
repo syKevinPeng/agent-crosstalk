@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""retire-peer: archive or stop an agent that bin/spawn-peer created. It refuses ids
+with no spawn record and sessions whose name or folder no longer match that record.
+Permanent deletion needs --delete plus --approval.
+See ../README.md, section "Creating and retiring agents"."""
+import argparse
+import json
+import os
+import subprocess
+import sys
+
+BIN = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(BIN), "lib"))
+import spawn_log  # noqa: E402
+from codex_ws import CodexError, CodexWS  # noqa: E402
+
+EXIT_LOG, EXIT_USAGE, EXIT_REFUSED, EXIT_FAILED = 1, 2, 3, 4
+ACTIONS = {("codex", False): "archive", ("codex", True): "delete",
+           ("claude", False): "stop", ("claude", True): "rm"}
+
+
+class Mismatch(Exception):
+    """The live session is not the one the spawn record describes."""
+
+
+def claude_bin():
+    return os.environ.get("CLAUDE_BIN") or "claude"
+
+
+def check_same(what, live, recorded):
+    # An unnamed Codex thread is accepted: spawn-peer records before it names.
+    for field in ("name", "cwd"):
+        if field == "name" and what == "codex" and not live.get("name"):
+            continue  # only Codex: the id is a daemon-issued UUID and the folder must still match
+        if live.get(field) != recorded.get(field):
+            raise Mismatch(f"live {field} {live.get(field)!r} differs from the recorded {recorded.get(field)!r}")
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(
+        prog="retire-peer", description="Archive or stop an agent created by spawn-peer.",
+        epilog="Exit status: 0 done and recorded; 1 done but not recorded (the line is printed); "
+               "2 usage error; 3 refused, nothing changed; 4 the retire step failed.")
+    parser.add_argument("--dry-run", action="store_true", help="print what would happen; change nothing")
+    parser.add_argument("--delete", action="store_true",
+                        help="delete permanently (codex delete / claude rm) instead of archive / stop. "
+                             "`claude rm` also deletes the session's worktree if it has one")
+    parser.add_argument("--approval", default="",
+                        help="with --delete: where and when the owner approved this deletion. It is recorded")
+    parser.add_argument("id", help="the id that spawn-peer printed")
+    parser.add_argument("sender", help='who is retiring it, e.g. "claude/my-session"')
+    args = parser.parse_args(argv)
+    if args.delete and not args.approval.strip():
+        parser.error("--delete needs --approval: permanent deletion requires the owner's approval")
+    if not args.sender.strip() or "\n" in args.sender:
+        parser.error("sender must be a non-empty single line")
+
+    events = spawn_log.events_for(args.id)
+    spawned = [e for e in events if e.get("event") == "spawned"]
+    if not spawned:
+        print(f"retire-peer: {args.id} was not created by spawn-peer; refusing to touch it", file=sys.stderr)
+        return EXIT_REFUSED
+    if any(e.get("action") in ("delete", "rm") for e in events):
+        print(f"retire-peer: {args.id} is already deleted", file=sys.stderr)
+        return EXIT_REFUSED
+    origin = spawned[-1]  # the newest record wins if a short Claude id was ever reused
+    kind = origin.get("kind")
+    if kind not in ("codex", "claude"):
+        print(f"retire-peer: the spawn record for {args.id} has no valid kind", file=sys.stderr)
+        return EXIT_REFUSED
+    action = ACTIONS[(kind, args.delete)]
+    if not args.delete and any(e.get("action") == action for e in events):
+        print(f"retire-peer: {args.id} already had `{action}` applied", file=sys.stderr)
+        return EXIT_REFUSED
+
+    if args.dry_run:
+        print(f"DRY RUN: would check the live session, then apply `{action}` to {kind} agent "
+              f"{origin.get('name')!r} ({args.id}). Nothing contacted, nothing changed.")
+        return 0
+
+    try:
+        if kind == "codex":
+            ws = CodexWS()
+            try:
+                live = ws.rpc("thread/read", {"threadId": args.id}).get("thread")
+                if not isinstance(live, dict) or live.get("id") != args.id:
+                    raise Mismatch("the daemon did not return this thread")
+                check_same("codex", live, origin)
+                ws.rpc(f"thread/{action}", {"threadId": args.id})
+            finally:
+                ws.close()
+        else:
+            listed = subprocess.run([claude_bin(), "agents", "--json", "--all"],
+                                    capture_output=True, text=True, timeout=30)
+            sessions = json.loads(listed.stdout or "[]") if listed.returncode == 0 else []
+            live = [s for s in sessions if isinstance(s, dict) and s.get("id") == args.id]
+            if len(live) != 1:
+                raise Mismatch(f"expected exactly 1 live Claude session with id {args.id}, found {len(live)}")
+            check_same("claude", live[0], origin)
+            # Never pass --discard-unpushed or --force-remove-worktree: those are the owner's call.
+            done = subprocess.run([claude_bin(), action, args.id], capture_output=True, text=True, timeout=120)
+            if done.returncode != 0:
+                raise RuntimeError(f"`claude {action}` exited {done.returncode}: {done.stderr.strip()[-200:]}")
+    except Mismatch as exc:
+        print(f"retire-peer: {exc}; refusing to touch it", file=sys.stderr)
+        return EXIT_REFUSED
+    except (CodexError, RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        print(f"retire-peer: {exc}; nothing recorded", file=sys.stderr)
+        return EXIT_FAILED
+
+    line = {"time_utc": spawn_log.now(), "event": "retired", "kind": kind, "id": args.id,
+            "action": action, "retired_by": args.sender, "approval": args.approval.strip() or None}
+    try:
+        spawn_log.append(line)
+    except OSError:
+        print(f"retire-peer: `{action}` was applied but could not be recorded; unlogged line:", file=sys.stderr)
+        print(json.dumps(line, ensure_ascii=False), file=sys.stderr)
+        return EXIT_LOG
+    print(f"Applied `{action}` to {kind} agent {origin.get('name')!r} ({args.id}).")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

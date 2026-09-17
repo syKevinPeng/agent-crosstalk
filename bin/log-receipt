@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# log-receipt: record that an earlier cross-agent message was received.
+# Appends one "receipt" line to the JSONL log. Never edits the send line.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: log-receipt <msg_id> <confirmed_by> <evidence>
+
+  msg_id        The Msg-ID of the message, as stamped by send-to-codex or send-to-claude.
+  confirmed_by  Who confirmed it, e.g. "codex/reviewer" or "claude/my-session".
+  evidence      One line: what shows receipt, e.g. "reply REVIEW-006 cites the Msg-ID".
+
+Environment:
+  AGENT_COMMS_LOG  JSONL log file (default: <agent-comms>/log/messages.jsonl)
+
+Exit status: 0 logged; 2 usage error; 3 no successful send with this msg_id in the log; 1 append failed.
+EOF
+}
+
+die_usage() {
+  printf 'log-receipt: %s\n' "$1" >&2
+  usage >&2
+  exit 2
+}
+
+case ${1:-} in -h | --help) usage; exit 0 ;; esac
+(($# == 3)) || die_usage "expected 3 arguments, got $#"
+msg_id=$1
+confirmed_by=$2
+evidence=$3
+[[ $msg_id =~ ^[0-9a-fA-F-]{36}$ ]] || die_usage "msg_id is not a UUID"
+[[ -n ${confirmed_by//[[:space:]]/} && $confirmed_by != *$'\n'* ]] || die_usage "confirmed_by must be a non-empty single line"
+[[ -n ${evidence//[[:space:]]/} && $evidence != *$'\n'* ]] || die_usage "evidence must be a non-empty single line"
+
+for tool in jq flock; do
+  command -v "$tool" >/dev/null || { printf 'log-receipt: not found: %s\n' "$tool" >&2; exit 127; }
+done
+
+project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+log_file=${AGENT_COMMS_LOG:-$project_dir/log/messages.jsonl}
+
+# Read the log line by line, so one torn line cannot hide every message after it.
+# A receipt needs a send line for this msg_id that is not itself a receipt or an error.
+if [[ ! -f $log_file ]] ||
+  ! jq -Rse --arg id "$msg_id" \
+    '[split("\n")[] | fromjson? | objects
+      | select(.msg_id == $id and .channel != "receipt" and .result != "error")] | length > 0' \
+    "$log_file" >/dev/null; then
+  printf 'log-receipt: no successfully sent message with msg_id %s in %s\n' "$msg_id" "$log_file" >&2
+  exit 3
+fi
+
+line=$(jq -cn --arg time_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg msg_id "$msg_id" \
+  --arg confirmed_by "$confirmed_by" --arg evidence "${evidence:0:300}" \
+  '{time_utc: $time_utc, channel: "receipt", msg_id: $msg_id,
+    confirmed_by: $confirmed_by, evidence: $evidence}')
+
+if ! {
+  flock -x -w 30 9 &&
+    printf '%s\n' "$line" >&9 &&
+    sync -- "$log_file"
+} 9>>"$log_file"; then
+  printf 'log-receipt: could not append to %s; unlogged line:\n%s\n' "$log_file" "$line" >&2
+  exit 1
+fi
+printf 'Receipt logged for %s\n' "$msg_id"

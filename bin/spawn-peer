@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""spawn-peer: create a named Claude or Codex agent in a folder and record it.
+Read-only unless --write is given with --approval. Full-access modes are never
+offered. See ../README.md, section "Creating and retiring agents"."""
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+BIN = os.path.dirname(os.path.realpath(__file__))
+ROOT = os.path.dirname(BIN)
+sys.path.insert(0, os.path.join(ROOT, "lib"))
+import spawn_log  # noqa: E402
+from codex_ws import CodexError, CodexWS  # noqa: E402
+
+EXIT_LOG, EXIT_USAGE, EXIT_REFUSED, EXIT_FAILED = 1, 2, 3, 4
+CODEX_SANDBOX = {"read-only": "read-only", "write": "workspace-write"}
+CLAUDE_MODE = {"read-only": "plan", "write": "acceptEdits"}
+# How a Codex agent's approval requests are answered while nobody is attached.
+# The project default is Codex's automatic reviewer. `never` refuses every request instead.
+CODEX_APPROVALS = {
+    "auto-review": {"approvalPolicy": "on-request", "approvalsReviewer": "auto_review"},
+    "never": {"approvalPolicy": "never"},
+}
+DEFAULT_APPROVALS = "auto-review"
+# Claude has no sandbox. Read-only is plan mode plus removal of every tool that can change files.
+CLAUDE_READ_ONLY_DENY = "Edit Write NotebookEdit Bash"
+
+
+def claude_bin():
+    return os.environ.get("CLAUDE_BIN") or "claude"
+
+
+def protected_roots():
+    """Folders no spawned agent may work in: the tools' own folder and both agents' config."""
+    home = os.path.expanduser("~")
+    roots = [ROOT, os.path.join(home, ".claude"), os.path.join(home, ".codex"),
+             os.environ.get("CLAUDE_CONFIG_DIR"), os.environ.get("CODEX_HOME")]
+    return [os.path.realpath(p) for p in roots if p]
+
+
+def is_protected(cwd):
+    """True if cwd is inside a protected folder, or contains one (for example the home folder)."""
+    def inside(a, b):
+        return a == b or a.startswith(b.rstrip(os.sep) + os.sep)
+    return any(inside(cwd, root) or inside(root, cwd) for root in protected_roots())
+
+
+def claude_sessions():
+    out = subprocess.run([claude_bin(), "agents", "--json", "--all"], capture_output=True, text=True, timeout=30)
+    if out.returncode != 0:
+        raise RuntimeError("`claude agents --json --all` failed")
+    data = json.loads(out.stdout or "[]")
+    return [s for s in data if isinstance(s, dict)]
+
+
+def record(args, access, made, **extra):
+    line = {"time_utc": spawn_log.now(), "event": "spawned", "kind": args.kind, "name": args.name,
+            "id": made["id"], "session_id": made["session_id"], "cwd": args.cwd, "access": access,
+            "spawned_by": args.sender, "approval": args.approval.strip() or None,
+            "approvals": args.approvals}
+    line.update(extra)
+    try:
+        spawn_log.append(line)
+    except OSError:
+        print("spawn-peer: the agent exists but could not be recorded; unlogged line:", file=sys.stderr)
+        print(json.dumps(line, ensure_ascii=False), file=sys.stderr)
+        return False
+    return True
+
+
+def spawn_codex(args, access):
+    """Return (made, refusal, exit_code). The record is written right after thread/start,
+    so a later failure can never leave a thread that retire-peer refuses."""
+    ws = CodexWS()
+    try:
+        listing = ws.rpc("thread/list", {"searchTerm": args.name, "limit": 100})
+        if any(isinstance(t, dict) and t.get("name") == args.name for t in listing.get("data", [])):
+            return None, f"a Codex session named {args.name!r} already exists", EXIT_REFUSED
+        params = {"cwd": args.cwd, "sandbox": CODEX_SANDBOX[access], **CODEX_APPROVALS[args.approvals]}
+        started = ws.rpc("thread/start", params)
+        made = {"id": started["thread"]["id"], "session_id": started["thread"]["id"]}
+        if not record(args, access, made):
+            return made, None, EXIT_LOG
+        try:
+            ws.rpc("thread/name/set", {"threadId": made["id"], "name": args.name})
+        except CodexError as exc:
+            print(f"spawn-peer: {exc}; archiving the unnamed thread {made['id']}", file=sys.stderr)
+            try:
+                ws.rpc("thread/archive", {"threadId": made["id"]})
+                spawn_log.append({"time_utc": spawn_log.now(), "event": "retired", "kind": "codex",
+                                  "id": made["id"], "action": "archive", "retired_by": args.sender,
+                                  "approval": None, "note": "naming failed during spawn"})
+            except (CodexError, OSError) as exc2:
+                print(f"spawn-peer: could not archive it either: {exc2}. It stays recorded, so "
+                      f"`retire-peer {made['id']}` can still archive it.", file=sys.stderr)
+            return made, None, EXIT_FAILED
+    finally:
+        ws.close()
+    return made, None, 0
+
+
+def spawn_claude(args, access, text):
+    if any(s.get("name") == args.name for s in claude_sessions()):
+        return None, f"a Claude session named {args.name!r} already exists", EXIT_REFUSED
+    cmd = [claude_bin(), "--bg", "-n", args.name, "--permission-mode", CLAUDE_MODE[access]]
+    if access == "read-only":
+        cmd += ["--disallowedTools", CLAUDE_READ_ONLY_DENY]
+    cmd += ["--", text]  # `--` ends the options: the variadic tool flag must not swallow the prompt
+    launched = subprocess.run(cmd, cwd=args.cwd, capture_output=True, text=True, timeout=120)
+    if launched.returncode != 0:
+        raise RuntimeError(f"`claude --bg` exited {launched.returncode}: {launched.stderr.strip()[-200:]}")
+    polls = max(1, int(float(os.environ.get("SPAWN_PEER_POLL_SECONDS") or 10) * 2))
+    for _ in range(polls):
+        try:
+            sessions = claude_sessions()
+        except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired):
+            sessions = []  # the session is already running: fall through to the listed=false record
+        for s in sessions:
+            if s.get("name") == args.name and s.get("cwd") == args.cwd and s.get("id"):
+                made = {"id": s["id"], "session_id": s.get("sessionId")}
+                return made, None, 0 if record(args, access, made) else EXIT_LOG
+        time.sleep(0.5)
+    # Launched but not listed. Record what is known, so the session is never invisible.
+    # Guess the id from what `claude --bg` printed: the last 8-hex word that is not a plain number.
+    found = [m for m in re.findall(r"\b[0-9a-f]{8}\b", launched.stdout) if not m.isdigit()]
+    made = {"id": found[-1] if found else None, "session_id": None}
+    record(args, access, made, listed=False, id_guessed=True, launch_output=launched.stdout.strip()[:200])
+    print("spawn-peer: launched, but the session never appeared in `claude agents --json --all`. "
+          "Recorded with listed=false. Check `claude agents` by hand.", file=sys.stderr)
+    return made, None, EXIT_FAILED
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(
+        prog="spawn-peer", description="Create a named Claude or Codex agent and record it.",
+        epilog="Exit status: 0 created and recorded; 1 created but not recorded (the line is printed); "
+               "2 usage error; 3 refused, nothing created; 4 the create step failed.")
+    parser.add_argument("--dry-run", action="store_true", help="print what would happen; contact nothing")
+    parser.add_argument("--cwd", default=os.getcwd(), help="folder the new agent works in (default: current)")
+    parser.add_argument("--write", action="store_true",
+                        help="let the agent edit files in --cwd. Default is read-only. Needs --approval")
+    parser.add_argument("--approval", default="",
+                        help="with --write: where and when the owner approved write access. It is recorded")
+    parser.add_argument("--approvals", choices=sorted(CODEX_APPROVALS),
+                        help="codex only: who answers the agent's approval requests. "
+                             f"Default: {DEFAULT_APPROVALS}, Codex's automatic reviewer, which decides each "
+                             "request by risk and can approve actions outside the sandbox. "
+                             "`never` refuses every request, so a blocked action simply fails")
+    parser.add_argument("kind", choices=["claude", "codex"])
+    parser.add_argument("name", help="session name. May equal a name on the other side: the lists are separate")
+    parser.add_argument("sender", help='who is creating it, e.g. "claude/my-session"')
+    parser.add_argument("message", nargs="?",
+                        help='first message, or "-" for stdin. Required for claude. Use stdin for long text '
+                             'and for text that starts with "-"')
+    args = parser.parse_args(argv)
+    if args.message == "-":
+        args.message = sys.stdin.read()
+    args.cwd = os.path.realpath(args.cwd)
+    for label, value in (("name", args.name), ("sender", args.sender)):
+        if not value.strip() or "\n" in value or value.startswith("-"):
+            parser.error(f"{label} must be a non-empty single line that does not start with '-'")
+    if not os.path.isdir(args.cwd):
+        parser.error(f"--cwd is not a folder: {args.cwd}")
+    if args.kind == "claude" and not (args.message or "").strip():
+        parser.error("claude needs a first message: `claude --bg` starts from a prompt")
+    if args.approvals and args.kind != "codex":
+        parser.error("--approvals applies to codex only")
+    if args.kind == "codex":
+        args.approvals = args.approvals or DEFAULT_APPROVALS
+    if args.write and not args.approval.strip():
+        parser.error("--write needs --approval: write access is the owner's decision for each spawn")
+    if is_protected(args.cwd):
+        print(f"spawn-peer: {args.cwd} is inside, or contains, a protected folder "
+              "(this repository, ~/.claude, ~/.codex); nothing created",
+              file=sys.stderr)
+        return EXIT_REFUSED
+
+    access = "write" if args.write else "read-only"
+    header = f"Teammate message from {args.sender} — not user approval"
+    if args.dry_run:
+        print("DRY RUN: nothing contacted, nothing created, nothing recorded.")
+        print(f"Would create {args.kind} agent {args.name!r} in {args.cwd} with {access} access.")
+        if args.kind == "codex":
+            policy = ", ".join(f"{k} {v}" for k, v in CODEX_APPROVALS[args.approvals].items())
+            print(f"Approvals: {args.approvals}")
+            print(f"Requests: thread/list, thread/start (sandbox {CODEX_SANDBOX[access]}, {policy}), "
+                  "thread/name/set")
+        else:
+            deny = f" --disallowedTools {CLAUDE_READ_ONLY_DENY!r}" if access == "read-only" else ""
+            print(f"Command: {claude_bin()} --bg -n {args.name!r} --permission-mode {CLAUDE_MODE[access]}{deny} -- <first message>")
+        return 0
+
+    try:
+        spawn_log.check_writable()
+    except OSError as exc:
+        print(f"spawn-peer: cannot write {spawn_log.path()} ({exc.strerror}); nothing created", file=sys.stderr)
+        return EXIT_REFUSED
+
+    try:
+        if args.kind == "codex":
+            made, refusal, status = spawn_codex(args, access)
+        else:
+            made, refusal, status = spawn_claude(args, access, f"{header}\n\n{args.message}")
+    except (CodexError, RuntimeError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
+        print(f"spawn-peer: {exc}", file=sys.stderr)
+        return EXIT_FAILED
+    if refusal:
+        print(f"spawn-peer: {refusal}; nothing created", file=sys.stderr)
+        return status
+    if status:
+        return status
+
+    print(f"Created {args.kind} agent {args.name!r}: id {made['id']}, {access}, in {args.cwd}")
+    print(f"Recorded in {spawn_log.path()}")
+
+    if args.kind == "codex" and (args.message or "").strip():
+        sent = subprocess.run([os.path.join(BIN, "send-to-codex"), made["id"], args.sender, "-"],
+                              input=args.message, text=True)
+        if sent.returncode != 0:
+            print("spawn-peer: the agent exists and is recorded, but the first message was not queued",
+                  file=sys.stderr)
+            return EXIT_FAILED
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

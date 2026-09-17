@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""send-to-claude: write a teammate message to a Claude Code session's local
+messaging socket, then log it. Linux only. Method and limits: ../README.md,
+section "bin/send-to-claude". Checked against Claude Code 2.1.274. The inbox credential is held in memory only and is never printed,
+logged or passed on a command line."""
+import argparse
+import datetime
+import fcntl
+import glob
+import json
+import os
+import socket
+import struct
+import sys
+import uuid
+
+CHANNEL = "claude socket"
+EXIT_LOG, EXIT_USAGE, EXIT_IDENTITY, EXIT_SOCKET = 1, 2, 3, 4
+
+
+class IdentityError(Exception):
+    """The recipient could not be identified uniquely and safely."""
+
+
+def sessions_dir():
+    return os.environ.get("CLAUDE_SESSIONS_DIR") or os.path.expanduser("~/.claude/sessions")
+
+
+def log_path():
+    here = os.path.dirname(os.path.realpath(__file__))
+    default = os.path.join(os.path.dirname(here), "log", "messages.jsonl")
+    return os.environ.get("AGENT_COMMS_LOG") or default
+
+
+def load_registry(sdir):
+    entries = []
+    for path in sorted(glob.glob(os.path.join(sdir, "*.json"))):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                entry = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(entry, dict) and entry.get("sessionId"):
+            entries.append(entry)
+    return entries
+
+
+def find_recipient(sdir, session_id):
+    matches = [e for e in load_registry(sdir) if e.get("sessionId") == session_id]
+    if len(matches) != 1:
+        raise IdentityError(
+            f"expected exactly 1 registry entry for session {session_id}, found {len(matches)}"
+        )
+    entry = matches[0]
+    for field in ("pid", "messagingSocketPath", "procStart", "pidDomain"):
+        if not entry.get(field):
+            raise IdentityError(f"registry entry has no {field}")
+    try:
+        entry["pid"] = int(entry["pid"])
+    except (TypeError, ValueError):
+        raise IdentityError("registry entry has a pid that is not a number") from None
+    try:
+        os.kill(entry["pid"], 0)
+    except ProcessLookupError:
+        raise IdentityError(f"registry entry is stale: pid {entry['pid']} is not running") from None
+    except PermissionError:
+        pass  # the process exists under another user; the socket connect will decide
+    return entry
+
+
+def read_token(sdir, entry):
+    """Return the inbox credential. Error text never includes file contents."""
+    paths = glob.glob(os.path.join(sdir, f"{entry['pid']}.*.key"))
+    if len(paths) != 1:
+        raise IdentityError(
+            f"expected exactly 1 inbox-key record for pid {entry['pid']}, found {len(paths)}"
+        )
+    try:
+        with open(paths[0], encoding="utf-8") as fh:
+            record = json.load(fh)
+    except (OSError, ValueError):
+        raise IdentityError("inbox-key record could not be read") from None
+    if not isinstance(record, dict):
+        raise IdentityError("inbox-key record has an unexpected shape")
+    for field in ("procStart", "pidDomain"):
+        if record.get(field) != entry[field]:
+            raise IdentityError(f"{field} differs between the registry entry and the inbox-key record")
+    token = record.get("peerToken")
+    if not isinstance(token, str) or not token:
+        raise IdentityError("inbox-key record has no peerToken")
+    return token
+
+
+def reply_types(raw):
+    """Keep only the `type` of each JSON line the receiver sent back."""
+    types = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("type"), str):
+            types.append(obj["type"][:40])
+    return types
+
+
+def write_frames(sock_path, expected_pid, frames):
+    """Send the frames only if the listener is the registered process of this user."""
+    payload = "".join(json.dumps(f, ensure_ascii=False) + "\n" for f in frames).encode("utf-8")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(10)
+        sock.connect(sock_path)
+        cred = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("iII"))
+        peer_pid, peer_uid, _ = struct.unpack("iII", cred)  # struct ucred: pid_t, uid_t, gid_t
+        if peer_uid != os.getuid() or peer_pid != expected_pid:
+            raise IdentityError("the socket is not owned by the registered session process")
+        sock.sendall(payload)
+        sock.shutdown(socket.SHUT_WR)
+        sock.settimeout(2)
+        try:
+            raw = sock.recv(65536)
+        except OSError:
+            raw = b""
+    return reply_types(raw)
+
+
+def append_log(path, record):
+    line = json.dumps(record, ensure_ascii=False) + "\n"
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        fh.write(line)
+        fh.flush()
+        os.fsync(fh.fileno())
+    return line
+
+
+def first_nonblank_line(text):
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()[:200]
+    return ""
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        prog="send-to-claude",
+        description="Write a teammate message to a Claude Code session and log it.",
+        epilog="Exit status: 0 written and logged; 1 written but not logged; 2 usage error; "
+        "3 recipient or identity check failed, nothing sent; 4 socket failure. "
+        "A written message is not a receipt: see README, 'Receipts'.",
+    )
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print the recipient and the message; read no credential, open no socket, log nothing")
+    parser.add_argument("--list", action="store_true",
+                        help="list Claude sessions from the registry (no credential is read) and exit")
+    parser.add_argument("session", nargs="?", help="recipient session UUID, from --list or `claude agents --json`")
+    parser.add_argument("sender", nargs="?", help='who is sending, e.g. "codex/reviewer"')
+    parser.add_argument("message", nargs="?",
+                        help='message text, or "-" to read it from stdin. Use stdin for long text '
+                             '(argv is capped near 128 KB) and for text that starts with "-"')
+    args = parser.parse_args(argv)
+    if args.list:
+        return args
+    if args.session is None or args.sender is None or args.message is None:
+        parser.error("expected 3 arguments: session, sender, message")
+    if args.message == "-":
+        args.message = sys.stdin.read()
+    if not args.sender.strip() or "\n" in args.sender:
+        parser.error("sender must be a non-empty single line")
+    if not args.message.strip():
+        parser.error("message is empty")
+    try:
+        (args.sender + args.message).encode("utf-8")
+    except UnicodeEncodeError:
+        parser.error("sender and message must be valid UTF-8 text")
+    return args
+
+
+def main(argv):
+    args = parse_args(argv)  # argparse exits with status 2 on a usage error
+    sdir = sessions_dir()
+
+    if args.list:
+        for entry in load_registry(sdir):
+            print(f"{entry.get('sessionId')}\t{entry.get('name', '')}\t{entry.get('cwd', '')}")
+        return 0
+
+    msg_id = str(uuid.uuid4())
+    header = f"Teammate message from {args.sender} — not user approval"
+    text = f"{header}\nMsg-ID: {msg_id}\n\n{args.message}"
+    first_line = first_nonblank_line(args.message)
+
+    try:
+        entry = find_recipient(sdir, args.session)
+    except IdentityError as exc:
+        print(f"send-to-claude: {exc}; nothing sent", file=sys.stderr)
+        return EXIT_IDENTITY
+
+    if args.dry_run:
+        print("DRY RUN: no credential read, no socket opened, nothing sent, nothing logged.")
+        print(f"Recipient: {entry.get('name', '')} ({args.session}), cwd {entry.get('cwd', '')}")
+        print(f"Log file (on a real send): {log_path()}")
+        print(f"Logged first line: {first_line}")
+        print("Frame 1: {\"type\": \"auth\", \"token\": \"<not read in a dry run>\"}")
+        print(f"--- message as it would be written ---\n{text}\n--- end ---")
+        return 0
+
+    if not hasattr(socket, "SO_PEERCRED"):
+        print("send-to-claude: this platform cannot verify the socket's owner (Linux only); nothing sent",
+              file=sys.stderr)
+        return EXIT_IDENTITY
+
+    try:
+        token = read_token(sdir, entry)
+    except IdentityError as exc:
+        print(f"send-to-claude: {exc}; nothing sent", file=sys.stderr)
+        return EXIT_IDENTITY
+
+    frames = [
+        {"type": "auth", "token": token},
+        {"type": "user", "session_id": args.session, "msg_id": msg_id,
+         "message": {"role": "user", "content": text}},
+    ]
+    record = {
+        "time_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "channel": CHANNEL, "sender": args.sender, "thread": args.session,
+        "thread_uuid": args.session, "recipient_name": entry.get("name"),
+        "first_line": first_line, "result": "written", "queued_id": None,
+        "msg_id": msg_id, "reply_types": [], "error": None, "exit_code": 0,
+    }
+    status = 0
+    try:
+        record["reply_types"] = write_frames(entry["messagingSocketPath"], entry["pid"], frames)
+    except IdentityError as exc:
+        print(f"send-to-claude: {exc}; nothing sent", file=sys.stderr)
+        return EXIT_IDENTITY
+    except OSError as exc:
+        status = EXIT_SOCKET
+        record.update(result="error", exit_code=status,
+                      error=f"{type(exc).__name__}: {exc.strerror or 'socket error'}"[:300])
+    if not status and "error" in record["reply_types"]:
+        status = EXIT_SOCKET
+        record.update(result="error", exit_code=status, error="the receiver answered with an error frame")
+
+    try:
+        append_log(log_path(), record)
+    except OSError:
+        print("send-to-claude: could not append to the log; unlogged line:", file=sys.stderr)
+        print(json.dumps(record, ensure_ascii=False), file=sys.stderr)
+        return status or EXIT_LOG
+
+    if status:
+        print(f"send-to-claude: {record['error']}; logged as error", file=sys.stderr)
+        return status
+    print(f"Written message {msg_id} to session {args.session} ({entry.get('name', '')}).")
+    print("Written is not received: wait for a reply or ACK that cites this Msg-ID. Do not resend blindly.")
+    print(f"Logged to {log_path()}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Exception as exc:  # never let a traceback print local variables' context
+        print(f"send-to-claude: unexpected {type(exc).__name__}; nothing further done", file=sys.stderr)
+        sys.exit(EXIT_SOCKET)

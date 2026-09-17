@@ -1,0 +1,6 @@
+# Local records. They hold session names, ids, folders and message summaries.
+log/
+# Local planning and review history. It names real sessions and folders.
+docs/
+__pycache__/
+*.pyc
