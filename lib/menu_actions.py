@@ -167,6 +167,8 @@ def perform(agent, button, text=""):
     """Run one popup button. Returns (note for the owner, succeeded?, close the popup?).
     Nothing that goes wrong here may crash the popup: the owner is told instead."""
     actions = {"Open pane": (open_pane, True), "Attach": (attach, True), "Retire": (retire, False)}
+    if button in ("Send", "Retire") and os.environ.get("AGENT_MENU_LOOK_ONLY"):
+        return "not done: look-only mode", False, False      # refused here too, not only hidden in the popup
     try:
         if button == "Send":
             return instruct(agent, text), True, False

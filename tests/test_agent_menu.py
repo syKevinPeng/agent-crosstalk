@@ -377,6 +377,17 @@ class AgentMenuTest(unittest.TestCase):
             self.assertIn("real terminal", proc.stderr)
             self.assertNotIn("Traceback", proc.stderr)
 
+    def test_look_only_mode_offers_no_typing_and_no_retire(self):
+        self.codex_thread(CODEX_C, "comms-test", status="active")
+        self.m.pane(7, 700, "codex", "comms-test | proj")
+        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "comms-test", "id": CODEX_C,
+                                     "access": "read-only", "spawned_by": "claude/x"})
+        self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Open pane, Send, Retire")
+        self.m.env["AGENT_MENU_LOOK_ONLY"] = "1"
+        text = self.detail(f"codex:{CODEX_C}").stdout
+        self.assertTrue(text.strip().endswith("buttons: Open pane"), text)
+        self.assertIn("look-only mode", text)
+
     def test_refreshing_only_reads(self):
         self.m.claude_session(CLAUDE_A, "reviewer", 500)
         self.codex_thread(CODEX_P, "builder")

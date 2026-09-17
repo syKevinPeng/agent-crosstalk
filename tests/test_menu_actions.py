@@ -123,6 +123,13 @@ class MenuActionsTest(unittest.TestCase):
             self.assertIn(type(error).__name__, note)
         self.assertEqual(menu_actions.perform(self.agent, "No such button"), ("", False, False))
 
+    def test_look_only_mode_refuses_send_and_retire_even_if_called(self):
+        with mock.patch.dict(os.environ, {"AGENT_MENU_LOOK_ONLY": "1"}):
+            for button in ("Send", "Retire"):
+                self.assertEqual(menu_actions.perform(self.agent, button, "hello"), ("not done: look-only mode", False, False))
+            self.assertEqual(menu_actions.perform(self.agent, "Open pane")[1], True)
+        self.assertEqual([c for c in self.acted() if c.startswith("send-keys")], [])
+
     def test_a_forgotten_stub_can_never_reach_the_real_codex(self):
         headless = agent_state.Agent(key="codex:t2", kind="codex", name="quiet", session_id="t2")
         with self.assertRaises(menu_actions.Refused):

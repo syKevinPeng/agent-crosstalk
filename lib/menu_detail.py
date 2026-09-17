@@ -14,6 +14,11 @@ def short_path(path):
     return "~" + path[len(home):] if path and path.startswith(home) else (path or "")
 
 
+def look_only(environ=None):
+    """AGENT_MENU_LOOK_ONLY=1: show everything, but offer nothing that types into an agent or retires one."""
+    return bool((os.environ if environ is None else environ).get("AGENT_MENU_LOOK_ONLY"))
+
+
 def buttons(agent):
     """Only actions that can work for this agent are offered."""
     out = []
@@ -25,7 +30,7 @@ def buttons(agent):
         out.append("Attach")
     if can_instruct(agent):
         out.append("Send")
-    if agent.spawned:
+    if agent.spawned and not look_only():
         out.append("Retire")
     return out
 
@@ -40,7 +45,7 @@ def button_labels(offered, columns):
 
 
 def can_instruct(agent):
-    if agent.auth or agent.retired:
+    if agent.auth or agent.retired or look_only():
         return False
     return bool(agent.pane_id) or agent.kind == "codex"
 
@@ -91,7 +96,9 @@ def body(agent, recent, reply, columns, glyphs=None):
             for line in textwrap.wrap(paragraph, max(columns - 2, 10)) or [""]:
                 out.append(("  " + line, "plain"))
     if not can_instruct(agent):
-        if agent.auth:
+        if look_only():
+            why = "look-only mode: no instruction line and no Retire"
+        elif agent.auth:
             why = "instruction line is off while a credential prompt is on screen"
         elif agent.retired:
             why = "this agent is retired"
