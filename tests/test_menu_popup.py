@@ -76,10 +76,31 @@ class PopupTest(unittest.TestCase):
             self.assertEqual(state.text, "rry open retire q")
             self.assertFalse(state.close)
 
-    def test_a_pasted_instruction_sends_its_first_line_and_the_rest_cannot_retire(self):
+    def test_a_paste_can_fill_the_instruction_line_but_never_send_it(self):
+        # One burst that begins with the typing hotkey and ends with a newline.
+        state, actions = play(ALL, chars("i delete everything\n"), gap=PASTE)
+        self.assertEqual(actions, [])
+        self.assertTrue(state.pasted)
+        # The owner opens the line by hand, then pastes two lines.
         state, actions = play(ALL, chars("i") + [(k, v, PASTE) for k, v in chars("first line\nry second\n")])
+        self.assertEqual(actions, [])
+        self.assertEqual(state.text, "first linery second")            # visible, reviewable, not sent
+        # A paste that arrives in chunks: the newline opens a new chunk a moment later. Still not sent.
+        chunked = chars("i") + [(k, v, PASTE) for k, v in chars("drop the table")] + [("key", "enter", SETTLE / 2)]
+        self.assertEqual(play(ALL, chunked)[1], [])
+        # A deliberate Enter after a pause sends what was pasted.
+        state, actions = play(ALL, chunked + [("key", "enter", SETTLE * 2)])
         self.assertEqual(actions, ["Send"])
-        self.assertEqual(state.text, "first line")
+        self.assertFalse(after_action(state, "Send", succeeded=True).pasted)
+
+    def test_hand_typed_text_sends_on_an_ordinary_enter(self):
+        fast_typist = 0.12
+        state, actions = play(ALL, chars("i") + chars("run the tests\n"), gap=fast_typist)
+        self.assertEqual((actions, state.pasted), (["Send"], False))
+        # Clearing a pasted line by hand makes it a fresh line again.
+        events = chars("i") + [(k, v, PASTE) for k, v in chars("ab")] + [("key", "backspace"), ("key", "backspace")]
+        state, _ = play(ALL, events)
+        self.assertEqual((state.text, state.pasted), ("", False))
 
     def test_send_needs_text_and_keeps_it_when_refused(self):
         state, actions = play(ALL, [("key", "tab"), ("key", "enter")])     # focus Send, press it, no text
