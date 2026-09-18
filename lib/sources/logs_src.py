@@ -47,6 +47,8 @@ def spawned():
                                 "cwd": clean(record.get("cwd")), "spawned_by": record.get("spawned_by") or "",
                                 "access": "rw" if record.get("access") == "write" else "ro",
                                 "retired_at": None}
+        elif record.get("event") == "resumed" and agent_id in agents:
+            agents[agent_id]["retired_at"] = None          # brought back from the agent menu: live again
         elif record.get("event") == "retired" and agent_id in agents:
             agents[agent_id]["retired_at"] = parse_time(record.get("time_utc"))
     return list(agents.values())

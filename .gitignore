@@ -4,3 +4,6 @@ log/
 docs/
 __pycache__/
 *.pyc
+# Git worktrees and explorations live inside the project but are never committed.
+.worktrees/
+explore/

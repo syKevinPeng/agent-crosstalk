@@ -20,10 +20,12 @@ HINT_ASCII = " Enter open  u limits  ? help"
 # Every help line fits the narrowest sidebar (32 cells) and the list fits 12 rows, so nothing is cut.
 HELP = ["KEYS", "↑ ↓  j k   move", "→         open, then first child", "←         fold, then to parent",
         "Space     fold or unfold", "Home End  first, last", "Enter     open detail popup",
-        "u         update limits", "w         wide or narrow", "?  help    q  quit", "Press any key."]
+        "u         update limits", "w         wide or narrow", "a         show quit agents",
+        "?  help    q  quit", "Press any key."]
 HELP_ASCII = ["KEYS", "up down j k   move", "right     open, then first child", "left      fold, then to parent",
               "Space     fold or unfold", "Home End  first, last", "Enter     open detail popup",
-              "u         update limits", "w         wide or narrow", "?  help    q  quit", "Press any key."]
+              "u         update limits", "w         wide or narrow", "a         show quit agents",
+              "?  help    q  quit", "Press any key."]
 MAX_INDENT = 4
 
 
@@ -100,8 +102,8 @@ def short_folder(path, columns, ellipsis="…"):
 
 
 def status(agent):
-    """The one state a row shows, most urgent first. A retired agent shows nothing but retired."""
-    if agent.retired:
+    """The one state a row shows, most urgent first. A retired or quit agent shows nothing else."""
+    if agent.retired or agent.quit:
         return "stopped"
     if agent.auth:
         return "auth"
@@ -127,7 +129,7 @@ def mark(agent, glyphs=None, frame=0):
 def header(snapshot, columns=34, glyphs=None):
     """The counts that matter, in words when they fit and as bare marks when they do not."""
     glyphs = glyphs or menu_style.UNICODE
-    agents = snapshot.by_key.values()
+    agents = [a for a in snapshot.by_key.values() if not a.quit]   # quit agents are parked, not waiting
     counts = [(glyphs["auth"], sum(1 for a in agents if a.auth), "needs login"),
               (glyphs["needs"], sum(1 for a in agents if a.needs_owner and not a.auth), "need you"),
               (glyphs["unanswered"], sum(a.open_messages for a in agents), "unanswered")]
@@ -173,7 +175,8 @@ def rows(snapshot, columns, collapsed=(), glyphs=None, frame=0, tier=None):
         if tier == "narrow":
             right = sign                                   # a strip says who needs you, nothing else
         else:
-            kind = "retired" if agent.retired else f"{agent.access + ' ' if agent.access else ''}{agent.kind}"
+            kind = "quit" if agent.quit else ("retired" if agent.retired else
+                                              f"{agent.access + ' ' if agent.access else ''}{agent.kind}")
             right = f"{kind} {sign}"
             if tier == "wide":
                 folder = pad(short_folder(agent.cwd, FOLDER_COLUMNS, glyphs["ellipsis"]), FOLDER_COLUMNS)
@@ -182,8 +185,9 @@ def rows(snapshot, columns, collapsed=(), glyphs=None, frame=0, tier=None):
         room = columns - width(prefix) - width(fold) - width(right) - 2
         name = fit(agent.name, max(room, 4), glyphs["ellipsis"])
         gap = " " * max(columns - width(prefix) - width(fold) - width(name) - width(right) - 1, 1)
+        style = "quit" if agent.quit else ("retired" if agent.retired else "row")
         out.append({"text": f"{prefix}{fold}{name}{gap}{right}", "key": agent.key,
-                    "style": "retired" if agent.retired else "row", "mark": sign, "look": status(agent)})
+                    "style": style, "mark": sign, "look": status(agent)})
 
     drawn = set()
 
@@ -203,13 +207,29 @@ def rows(snapshot, columns, collapsed=(), glyphs=None, frame=0, tier=None):
 
     for root in snapshot.roots:
         walk(root, 0, True)
+    if snapshot.quit_agents:
+        out.append({"text": fit(" QUIT" + glyphs["separator"] + "a hides", columns, glyphs["ellipsis"]),
+                    "key": "", "style": "quitdiv", "mark": "", "look": ""})
+        for agent in snapshot.quit_agents:
+            add(agent, " ", glyphs["leaf"])
     return out
+
+
+def pinned_count(rendered):
+    """Rows that stay at the top while the list scrolls: the header and any error lines. Only the
+    leading run counts, so a divider further down scrolls with the rows around it."""
+    count = 0
+    for row in rendered:
+        if row["key"]:
+            break
+        count += 1
+    return count
 
 
 def scroll_top(rendered, selected, room, top):
     """First row to draw so that the selected row is on screen. Rows 0.. hold the header and any
     error lines, which stay pinned, so `room` is what is left under them for agent rows."""
-    pinned = sum(1 for row in rendered if not row["key"])
+    pinned = pinned_count(rendered)
     body = [row["key"] for row in rendered[pinned:]]
     if selected not in body or room <= 0:
         return 0

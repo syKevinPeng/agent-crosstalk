@@ -27,6 +27,7 @@ class FakeCodexDaemon:
 
     def __init__(self, path, existing_names=(), fail=()):
         self.calls = []
+        self.archived = set()
         self.fail = set(fail)
         self.threads = {f"old-{i}": {"id": f"old-{i}", "name": n, "cwd": "/x"}
                         for i, n in enumerate(existing_names)}
@@ -57,8 +58,15 @@ class FakeCodexDaemon:
         if method == "account/rateLimits/read":
             return getattr(self, "account", {})
         if method == "thread/list":
+            # Like the real daemon: archived threads are listed only when asked for, and only then.
             hidden = getattr(self, "hidden_from_list", set())
-            return {"data": [t for t in self.threads.values() if t["id"] not in hidden]}
+            want_archived = bool(params.get("archived"))
+            return {"data": [t for t in self.threads.values()
+                             if t["id"] not in hidden and (t["id"] in self.archived) == want_archived]}
+        if method == "thread/archive":
+            self.archived.add(params["threadId"])
+        if method == "thread/unarchive":
+            self.archived.discard(params["threadId"])
         if method == "thread/start":
             self.threads[THREAD_ID] = {"id": THREAD_ID, "name": None, "cwd": params.get("cwd")}
             return {"thread": self.threads[THREAD_ID]}
@@ -372,6 +380,18 @@ class PeersTest(unittest.TestCase):
         self.assertEqual(daemon.params("thread/delete"), [])
         self.assertEqual(self.records()[-1]["action"], "archive")
         self.assertEqual(self.run_tool(RETIRE, THREAD_ID, "claude/t").returncode, 3)  # already archived
+
+    def test_an_agent_resumed_from_the_menu_can_be_retired_again(self):
+        daemon = FakeCodexDaemon(self.sock)
+        self.spawn_codex()
+        self.assertEqual(self.run_tool(RETIRE, THREAD_ID, "claude/t").returncode, 0)
+        self.assertEqual(self.run_tool(RETIRE, THREAD_ID, "claude/t").returncode, 3)   # already archived
+        daemon.archived.discard(THREAD_ID)
+        with open(self.spawn_log, "a") as fh:                                       # what the menu writes
+            fh.write(json.dumps({"event": "resumed", "kind": "codex", "id": THREAD_ID}) + "\n")
+        proc = self.run_tool(RETIRE, THREAD_ID, "claude/t")
+        self.assertEqual(proc.returncode, 0, proc.stderr)                              # only the latest step counts
+        self.assertEqual(daemon.params("thread/archive"), [{"threadId": THREAD_ID}] * 2)
 
     def test_retire_dry_run_changes_nothing(self):
         daemon = FakeCodexDaemon(self.sock)

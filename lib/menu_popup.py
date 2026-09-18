@@ -4,7 +4,7 @@ Pasted text must never act. Ordinary words hold the hotkeys (`error` has `rr`), 
 outside the instruction line. A character that arrives within BURST seconds of the previous one is
 part of a paste and is ignored.
 
-The risky action needs a second, different kind of step: `r` arms it, and then only `y` or Enter
+The risky action needs a second, different kind of step: `x` arms it, and then only `y` or Enter
 confirms, only once SETTLE seconds have passed, and only as the very next key. Anything else
 disarms it, a pasted key included. That is what stops a paste arriving in chunks: a pause between
 chunks looks like a person, but the characters in between disarm the button long before the chunk
@@ -21,8 +21,8 @@ the action to perform. Events: ("char", "x"), ("key", "enter" | "esc" | "tab" | 
 "right" | "backspace" | "pgup" | "pgdn"), ("click", "<button>" | "input")."""
 import dataclasses
 
-HOTKEYS = {"o": "Open pane", "t": "Attach", "r": "Retire"}
-RISKY = ("Retire",)          # armed first, then confirmed. Nothing else is.
+HOTKEYS = {"o": "Open pane", "t": "Attach", "x": "Quit agent", "r": "Resume"}
+RISKY = ("Quit agent",)      # armed first, then confirmed. Nothing else is: Resume only brings back.
 BURST = 0.05                 # seconds. No one types two keys this fast; a paste always does
 SETTLE = 0.6                 # seconds between arming and a confirm that counts
 

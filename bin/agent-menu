@@ -51,11 +51,11 @@ class Poller(threading.Thread):
 
     def __init__(self):
         super().__init__(daemon=True)
-        self.snapshot, self.wake = None, threading.Event()
+        self.snapshot, self.wake, self.show_quit = None, threading.Event(), False
 
     def run(self):
         while True:
-            self.snapshot = agent_state.safe_collect()
+            self.snapshot = agent_state.safe_collect(include_quit=self.show_quit)
             self.wake.wait(REFRESH_SECONDS)
             self.wake.clear()
 
@@ -108,7 +108,7 @@ def run(screen):
         else:
             selected, collapsed = menu_render.move(snapshot, collapsed, selected, "stay")
             rendered = menu_render.rows(snapshot, columns, collapsed, glyphs, frame // 2)
-            pinned = [row for row in rendered if not row["key"]]
+            pinned = rendered[:menu_render.pinned_count(rendered)]
             block = menu_render.limit_rows(limits.limits, columns, glyphs, limits.taken_at,
                                            time.time(), limits.errors)
             if height - 1 - len(block) < len(pinned) + 3:
@@ -123,7 +123,8 @@ def run(screen):
             rendered = on_screen               # from here on, row y on screen is rendered[y]: clicks map right
             cursor_row = 0
             for y, row in enumerate(on_screen):
-                attr = {"header": curses.A_BOLD, "retired": curses.A_DIM}.get(row["style"], 0)
+                attr = {"header": curses.A_BOLD, "retired": curses.A_DIM, "quit": curses.A_DIM,
+                        "quitdiv": curses.A_DIM | curses.A_BOLD}.get(row["style"], 0)
                 if row["style"] == "error":
                     attr = menu_curses.look("auth", colour)
                 chosen = row["key"] and row["key"] == selected
@@ -160,6 +161,11 @@ def run(screen):
                     tmux_src.resize(pane, target)
                 except SourceError as exc:
                     note = str(exc)
+            continue
+        if pressed in (ord("a"), ord("A")):
+            poller.show_quit = not poller.show_quit
+            note = "showing quit agents" if poller.show_quit else "hiding quit agents"
+            poller.wake.set()
             continue
         if pressed in (ord("u"), ord("U")):
             note = "updating limits…"

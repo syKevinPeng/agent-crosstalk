@@ -1,10 +1,12 @@
 """Text of the popup for one agent. Pure: takes data, returns lines and the buttons that apply."""
 import os
+import re
 import textwrap
 
 import menu_render
 import menu_style
 
+SHORT_ID = re.compile(r"[0-9a-f]{6,32}")
 LABELS = {"auth": "needs login", "needs": "needs you", "unanswered": "unanswered",
           "working": "working", "idle": "idle", "stopped": "stopped"}
 
@@ -19,9 +21,45 @@ def look_only(environ=None):
     return bool((os.environ if environ is None else environ).get("AGENT_MENU_LOOK_ONLY"))
 
 
+def can_quit(agent):
+    """Quit stops or archives an agent so it can be resumed. Nothing is deleted."""
+    if agent.quit or agent.retired or agent.pane_id:
+        return False                              # one running in a pane is quit there, not from here
+    if agent.kind == "codex":
+        return True
+    return agent.background and bool(SHORT_ID.fullmatch(agent.short_id or ""))
+
+
+def quit_note(agent):
+    """Why Quit is not offered for a live agent, or "" when it is."""
+    if agent.quit or agent.retired or can_quit(agent):
+        return ""
+    if agent.pane_id:
+        return "it runs in a pane, so quit it there"
+    return "an interactive session ends only when its own terminal is closed"
+
+
+def can_resume(agent):
+    return agent.quit and (agent.kind == "codex" or bool(SHORT_ID.fullmatch(agent.short_id or "")))
+
+
+def quit_effect(agent):
+    """What Quit does to this agent, in the owner's words."""
+    if agent.kind == "codex":
+        return "archive it"
+    return "stop it (its conversation is kept)"
+
+
+def confirm_text(agent):
+    busy = " It is working right now." if agent.state == "working" else ""
+    return f"Quit {agent.name}? This will {quit_effect(agent)}; Resume brings it back.{busy}"
+
+
 def buttons(agent):
     """Only actions that can work for this agent are offered."""
     out = []
+    if agent.quit:
+        return ["Resume"] if can_resume(agent) else []
     if agent.retired:
         return []
     if agent.pane_id:
@@ -30,14 +68,14 @@ def buttons(agent):
         out.append("Attach")
     if can_instruct(agent):
         out.append("Send")
-    if agent.spawned and not look_only():
-        out.append("Retire")
+    if can_quit(agent) and not look_only():
+        out.append("Quit agent")
     return out
 
 
 def button_labels(offered, columns):
     """Labels with their key, or bare names when the row would not fit."""
-    keys = {"Open pane": "o", "Attach": "t", "Retire": "r"}
+    keys = {"Open pane": "o", "Attach": "t", "Quit agent": "x", "Resume": "r"}
     full = [f"[ {b} ]" if b == "Send" else f"[ {b} ({keys[b]}) ]" for b in offered]
     if sum(menu_render.width(label) + 2 for label in full) <= columns:
         return full
@@ -45,13 +83,15 @@ def button_labels(offered, columns):
 
 
 def can_instruct(agent):
-    if agent.auth or agent.retired or look_only():
+    if agent.auth or agent.retired or agent.quit or look_only():
         return False
     return bool(agent.pane_id) or agent.kind == "codex"
 
 
 def title(agent, parent_name):
     origin = f"spawned by: {parent_name}" if parent_name else ("spawned" if agent.spawned else "started by you")
+    if agent.quit:
+        origin += " · quit"
     access = f" · {agent.access}" if agent.access else ""
     return f"{agent.name} · {agent.kind}{access} · {short_path(agent.cwd)} · {origin}"
 
@@ -66,7 +106,12 @@ def body(agent, recent, reply, columns, glyphs=None):
     full, never cut: the owner must be able to read all of it."""
     glyphs = glyphs or menu_style.UNICODE
     out = []
-    if agent.auth:
+    if agent.quit:
+        out.append(("QUIT", "head"))
+        how = ("It is archived. Resume unarchives it and opens it in a new window." if agent.kind == "codex"
+               else "It is stopped and its conversation was kept. Resume attaches it in a new window.")
+        out += _wrapped(how, columns, "plain")
+    elif agent.auth:
         out.append(("NEEDS LOGIN", "head"))
         out += _wrapped(f"This agent is waiting for a credential: {agent.auth}.", columns, "warn")
         out += _wrapped("Open its pane and type it there. The menu never carries or records a secret.", columns, "plain")
@@ -96,8 +141,10 @@ def body(agent, recent, reply, columns, glyphs=None):
             for line in textwrap.wrap(paragraph, max(columns - 2, 10)) or [""]:
                 out.append(("  " + line, "plain"))
     if not can_instruct(agent):
-        if look_only():
-            why = "look-only mode: no instruction line and no Retire"
+        if agent.quit:
+            why = "it is quit: Resume brings it back"
+        elif look_only():
+            why = "look-only mode: no instruction line and no Quit"
         elif agent.auth:
             why = "instruction line is off while a credential prompt is on screen"
         elif agent.retired:
@@ -106,4 +153,7 @@ def body(agent, recent, reply, columns, glyphs=None):
             why = "a Claude session with no pane takes input only in its own terminal: use Attach"
         out.append(("", "blank"))
         out += _wrapped(f"({why})", columns, "dim")
+    note = quit_note(agent)
+    if note and not look_only():
+        out += _wrapped(f"(no Quit here: {note})", columns, "dim")
     return out

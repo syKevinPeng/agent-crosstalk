@@ -16,12 +16,14 @@ def _thread(raw):
     name = clean(raw.get("name")).strip() or raw["id"][:8]                        # never a blank row
     return {"kind": "codex", "session_id": raw["id"], "short_id": raw["id"][:8],
             "name": name, "cwd": clean(raw.get("cwd")), "pid": None, "model": clean(raw.get("model")),
-            "state": STATES.get(status, "unknown"), "background": False}
+            "state": STATES.get(status, "unknown"), "background": False, "quit": False}
 
 
-def list_threads(extra_ids=(), timeout=1.5):
+def list_threads(extra_ids=(), timeout=1.5, include_quit=False):
     """Listed threads, plus `extra_ids` read one by one. A thread that `spawn-peer` just created
-    is missing from the listing until its first turn, so the caller passes recorded ids here."""
+    is missing from the listing until its first turn, so the caller passes recorded ids here.
+    With `include_quit`, archived threads are added too, marked quit: archiving is how a Codex
+    thread is quit, and `thread/unarchive` brings it back."""
     try:
         ws = CodexWS(timeout=timeout)
     except CodexError as exc:
@@ -29,9 +31,14 @@ def list_threads(extra_ids=(), timeout=1.5):
     try:
         listing = ws.rpc("thread/list", {"limit": 200}).get("data", [])
         threads = {t["id"]: _thread(t) for t in listing if isinstance(t, dict) and isinstance(t.get("id"), str)}
+        if include_quit:
+            archived = ws.rpc("thread/list", {"limit": 200, "archived": True}).get("data", [])
+            for raw in archived:
+                if isinstance(raw, dict) and isinstance(raw.get("id"), str):
+                    threads[raw["id"]] = dict(_thread(raw), quit=True, state="stopped")
         for thread_id in extra_ids:
             if thread_id in threads:
-                continue
+                continue                     # already listed, possibly as quit
             try:
                 raw = ws.rpc("thread/read", {"threadId": thread_id}).get("thread")
             except CodexError:

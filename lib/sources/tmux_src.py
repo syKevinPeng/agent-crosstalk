@@ -84,10 +84,15 @@ def popup(command, width=100, height=26, title=""):
     _tmux(*args, command, timeout=None)
 
 
-def new_window(name, command):
+def new_window(name, command, cwd=None):
     """Open right after the current window. Without -a tmux takes the first free number, which can
-    put the new window ahead of the one the owner works in and reorder their tabs."""
-    _tmux("new-window", "-a", "-n", literal(name), command)
+    put the new window ahead of the one the owner works in and reorder their tabs. A folder is used
+    only when it exists and holds no `#`: tmux reads formats in it, and a doubled `#` would name the
+    wrong folder, so such a folder is simply not passed."""
+    args = ["new-window", "-a", "-n", literal(name)]
+    if cwd and "#" not in cwd and os.path.isdir(cwd):
+        args += ["-c", cwd]
+    _tmux(*args, command)
 
 
 def alive(pid):

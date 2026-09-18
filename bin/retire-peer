@@ -69,7 +69,10 @@ def main(argv):
         print(f"retire-peer: the spawn record for {args.id} has no valid kind", file=sys.stderr)
         return EXIT_REFUSED
     action = ACTIONS[(kind, args.delete)]
-    if not args.delete and any(e.get("action") == action for e in events):
+    # Only the latest step counts: an agent retired and then resumed from the agent menu is live again.
+    lifecycle = [e for e in events if e.get("event") in ("retired", "resumed")]
+    latest = lifecycle[-1] if lifecycle else {}
+    if not args.delete and latest.get("event") == "retired" and latest.get("action") == action:
         print(f"retire-peer: {args.id} already had `{action}` applied", file=sys.stderr)
         return EXIT_REFUSED
 

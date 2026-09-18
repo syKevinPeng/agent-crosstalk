@@ -43,8 +43,16 @@ exit "${STUB_CODEX_EXIT:-1}"
 """
 
 CLAUDE_STUB = r"""#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_DIR/claude-calls.txt"
 [[ -n ${STUB_CLAUDE_FAIL:-} ]] && exit 7
-[[ $1 == agents ]] && { cat "$STUB_DIR/claude.json"; exit 0; }
+if [[ $1 == agents ]]; then
+  if [[ " $* " == *" --all "* ]]; then cat "$STUB_DIR/claude-all.json"; else cat "$STUB_DIR/claude.json"; fi
+  exit 0
+fi
+if [[ $1 == stop ]]; then
+  [[ -n ${STUB_STOP_FAIL:-} ]] && { echo "no such session" >&2; exit 4; }
+  exit 0
+fi
 if [[ $1 == -p ]]; then
   [[ -n ${STUB_USAGE_FAIL:-} ]] && exit 3
   [[ -n ${STUB_USAGE_GARBAGE:-} ]] && { echo 'not json'; exit 0; }
@@ -67,7 +75,7 @@ class Machine:
         self.sock = str(self.dir / "d.sock")
         self.proc = self.dir / "proc"
         self.proc.mkdir()
-        self.panes, self.claude = [], []
+        self.panes, self.claude, self.claude_quit = [], [], []
         self.usage(USAGE_TEXT)
         self.env = dict(os.environ, STUB_DIR=str(self.dir), CODEX_APP_SERVER_SOCK=self.sock,
                         TMUX_BIN=str(executable(self.dir / "tmux-stub", TMUX_STUB)),
@@ -91,6 +99,17 @@ class Machine:
         self.process(pid, 1)
         self.write()
 
+    def quit_claude_session(self, session_id, name, cwd="/w"):
+        """A stopped background session: listed by `claude agents --json --all` only, the way the CLI
+        lists it (`state: done`, no process)."""
+        self.claude_quit.append({"sessionId": session_id, "id": session_id[:8], "name": name, "pid": None,
+                                 "status": None, "state": "done", "cwd": cwd, "kind": "background"})
+        self.write()
+
+    def claude_calls(self):
+        path = self.dir / "claude-calls.txt"
+        return path.read_text().splitlines() if path.exists() else []
+
     def claude_session(self, session_id, name, pid, status="idle", state=None, background=True, cwd="/w"):
         self.claude.append({"sessionId": session_id, "id": session_id[:8] if background else None, "name": name,
                             "pid": pid, "status": status if background else None, "state": state, "cwd": cwd,
@@ -102,6 +121,7 @@ class Machine:
         rows += rows  # a grouped session lists every pane twice
         (self.dir / "panes.tsv").write_text("\n".join(rows) + ("\n" if rows else ""))
         (self.dir / "claude.json").write_text(json.dumps(self.claude))
+        (self.dir / "claude-all.json").write_text(json.dumps(self.claude + self.claude_quit))
 
     def usage(self, text):
         (self.dir / "usage.txt").write_text(text)

@@ -124,20 +124,20 @@ class AgentMenuTest(unittest.TestCase):
         self.codex_thread(CODEX_P, "twin")
         self.m.pane(1, 100, "codex", "twin | proj")
         self.m.pane(2, 200, "codex", "twin | proj")
-        self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send")     # queued, never typed into a guess
+        self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send, Quit agent")     # queued, never typed into a guess
 
     def test_a_codex_thread_matches_its_name_segment_only_never_the_project(self):
         self.codex_thread(CODEX_P, "proj")            # named like the project folder of another agent's pane
         self.codex_thread(CODEX_C, "builder", status="active")
         self.m.pane(7, 700, "codex", "⠏ builder | proj")
-        self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send")
+        self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send, Quit agent")
         self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Open pane, Send")
         self.m.panes = []
         self.m.pane(8, 800, "codex", "[ . ] Action Required | builder | proj")      # a status segment in front
         self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Open pane, Send")
         self.m.panes = []
         self.m.pane(9, 900, "codex", "my builder | proj")                           # a substring is not a match
-        self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Send")
+        self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Send, Quit agent")
 
     def test_a_title_that_reads_two_ways_gives_the_pane_to_neither_agent(self):
         for full, part, title in (("a | b", "b", "a | b | proj"), ("- fix", "fix", "- fix | proj")):
@@ -147,8 +147,8 @@ class AgentMenuTest(unittest.TestCase):
                 self.codex_thread(CODEX_P, full, status="active")
                 self.codex_thread(CODEX_C, part, status="idle")
                 self.m.pane(1, 100, "codex", title)
-                self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send")
-                self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Send")
+                self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send, Quit agent")
+                self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Send, Quit agent")
                 del self.daemon.threads[CODEX_C]                 # alone, the full name does get its pane
                 self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Open pane, Send")
 
@@ -168,13 +168,13 @@ class AgentMenuTest(unittest.TestCase):
         self.m.pane(7, 700, "codex", "builder | proj")
         self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Open pane, Send")   # the live one keeps its pane
         self.daemon.threads[CODEX_C]["status"] = {"type": "idle"}                  # now two live agents fit one pane
-        self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send")
-        self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Send")
+        self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send, Quit agent")
+        self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Send, Quit agent")
 
     def test_the_pane_must_run_the_agents_own_cli(self):
         self.codex_thread(CODEX_P, "builder")
         self.m.pane(7, 700, "bash", "builder | proj")                              # any program can set a title
-        self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send")
+        self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send, Quit agent")
 
     def test_a_session_started_inside_another_session_gets_no_pane(self):
         self.m.claude_session(CLAUDE_A, "lead", 110)                      # runs in the pane
@@ -183,7 +183,7 @@ class AgentMenuTest(unittest.TestCase):
         self.m.process(110, 100)
         self.m.process(120, 110)
         self.assertEqual(self.buttons(f"claude:{CLAUDE_A}"), "buttons: Open pane, Send")
-        self.assertEqual(self.buttons(f"claude:{CLAUDE_B}"), "buttons: Attach")   # no pane, so no typing
+        self.assertEqual(self.buttons(f"claude:{CLAUDE_B}"), "buttons: Attach, Quit agent")   # no pane, so no typing
 
     def test_a_nested_session_with_the_same_name_gets_no_pane_either(self):
         self.m.claude_session(CLAUDE_A, "twin", 110)
@@ -191,7 +191,7 @@ class AgentMenuTest(unittest.TestCase):
         self.m.pane(1, 100, "claude", "twin")
         self.m.process(110, 100)
         self.m.process(120, 110)
-        self.assertEqual(self.buttons(f"claude:{CLAUDE_B}"), "buttons: Attach")
+        self.assertEqual(self.buttons(f"claude:{CLAUDE_B}"), "buttons: Attach, Quit agent")
         self.assertEqual(self.buttons(f"claude:{CLAUDE_A}"), "buttons: Open pane, Send")   # the real one keeps it
 
     def test_a_detached_session_gets_no_pane_whatever_a_title_says(self):
@@ -200,7 +200,7 @@ class AgentMenuTest(unittest.TestCase):
         self.m.claude_session(CLAUDE_A, "lead", 900, cwd="/w")
         self.m.pane(1, 100, "claude", "lead")                             # the title names it, and is ignored
         self.m.process(900, 1)                                            # detached, not under the pane
-        self.assertEqual(self.buttons(f"claude:{CLAUDE_A}"), "buttons: Attach")
+        self.assertEqual(self.buttons(f"claude:{CLAUDE_A}"), "buttons: Attach, Quit agent")
 
     def test_a_claude_pane_is_matched_by_process_even_when_the_title_is_a_status_line(self):
         self.m.claude_session(CLAUDE_A, "lead session", 500, status="busy")
@@ -331,7 +331,7 @@ class AgentMenuTest(unittest.TestCase):
     def test_a_background_claude_with_no_pane_offers_attach_only(self):
         self.m.claude_session(CLAUDE_B, "far away", 900)
         text = self.detail(f"claude:{CLAUDE_B}").stdout
-        self.assertIn("buttons: Attach\n", text)
+        self.assertIn("buttons: Attach, Quit agent\n", text)
         self.assertIn("use Attach", text)
 
     def test_a_dead_source_shows_an_error_line_not_stale_rows(self):
@@ -404,15 +404,12 @@ class AgentMenuTest(unittest.TestCase):
             self.assertIn("real terminal", proc.stderr)
             self.assertNotIn("Traceback", proc.stderr)
 
-    def test_look_only_mode_offers_no_typing_and_no_retire(self):
+    def test_look_only_mode_offers_no_typing_and_no_quit(self):
         self.codex_thread(CODEX_C, "comms-test", status="active")
-        self.m.pane(7, 700, "codex", "comms-test | proj")
-        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "comms-test", "id": CODEX_C,
-                                     "access": "read-only", "spawned_by": "claude/x"})
-        self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Open pane, Send, Retire")
+        self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Send, Quit agent")
         self.m.env["AGENT_MENU_LOOK_ONLY"] = "1"
         text = self.detail(f"codex:{CODEX_C}").stdout
-        self.assertTrue(text.strip().endswith("buttons: Open pane"), text)
+        self.assertEqual(text.strip().splitlines()[-1], "buttons:", text)
         self.assertIn("look-only mode", text)
 
     def test_refreshing_only_reads(self):

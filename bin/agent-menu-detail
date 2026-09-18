@@ -30,7 +30,7 @@ CHAR_KEYS = {"\x1b": "esc", "\n": "enter", "\r": "enter", "\t": "tab", "\x7f": "
 
 
 def load(key):
-    snapshot = agent_state.safe_collect()
+    snapshot = agent_state.safe_collect(include_quit=True)   # so a quit agent's popup can offer Resume
     agent = snapshot.by_key.get(key)
     if not agent:
         return None, "", [], ""
@@ -121,7 +121,7 @@ def run(screen, key):
                 if not state.typing and not state.text:
                     menu_curses.put(screen, height - 5, 4, "press i to type an instruction", curses.A_DIM)
             if state.confirm:
-                hint = f"{state.confirm} this agent? press y or Enter to confirm · any other key cancels"
+                hint = menu_detail.confirm_text(agent) + " y or Enter confirms · any other key cancels"
             elif state.typing:
                 hint = "Enter send · Esc stop typing"
             else:

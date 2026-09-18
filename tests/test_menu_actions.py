@@ -126,7 +126,7 @@ class MenuActionsTest(unittest.TestCase):
     def test_perform_tells_the_owner_instead_of_crashing(self):
         self.assertEqual(menu_actions.perform(self.agent, "Open pane"), ("pane focused", True, True))
         self.assertEqual(menu_actions.perform(self.agent, "Send", "hello")[:2], ("typed into its pane", True))
-        note, ok, close = menu_actions.perform(self.agent, "Retire")
+        note, ok, close = menu_actions.perform(self.agent, "Quit agent")    # in a pane: refused
         self.assertEqual((ok, close), (False, False))
         self.assertTrue(note.startswith("not done:"))
         for error in (OSError(28, "No space left"), subprocess.TimeoutExpired("x", 1)):
@@ -136,9 +136,9 @@ class MenuActionsTest(unittest.TestCase):
             self.assertIn(type(error).__name__, note)
         self.assertEqual(menu_actions.perform(self.agent, "No such button"), ("", False, False))
 
-    def test_look_only_mode_refuses_send_and_retire_even_if_called(self):
+    def test_look_only_mode_refuses_send_and_quit_even_if_called(self):
         with mock.patch.dict(os.environ, {"AGENT_MENU_LOOK_ONLY": "1"}):
-            for button in ("Send", "Retire"):
+            for button in ("Send", "Quit agent"):
                 self.assertEqual(menu_actions.perform(self.agent, button, "hello"), ("not done: look-only mode", False, False))
             self.assertEqual(menu_actions.perform(self.agent, "Open pane")[1], True)
         self.assertEqual([c for c in self.acted() if c.startswith("send-keys")], [])

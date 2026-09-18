@@ -15,8 +15,10 @@ import subprocess
 
 import agent_state
 import auth_readers
-from sources import tmux_src
-from sources.base import SourceError
+from codex_ws import CodexError, CodexWS
+from sources import claude_src, tmux_src
+from sources.base import SourceError, clean
+import spawn_log
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
@@ -170,11 +172,138 @@ def retire(agent):
     return "retired"
 
 
+SHORT_ID = re.compile(r"[0-9a-f]{6,32}")
+THREAD_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def _codex_rpc(method, params):
+    ws = CodexWS()
+    try:
+        return ws.rpc(method, params)
+    finally:
+        ws.close()
+
+
+def _check_codex(agent):
+    """The id must still belong to a thread of this name. Refuse if the daemon says otherwise."""
+    if not THREAD_ID.fullmatch(agent.session_id or ""):
+        raise Refused("this thread has no usable id")
+    try:
+        thread = _codex_rpc("thread/read", {"threadId": agent.session_id}).get("thread")
+    except CodexError as exc:
+        raise Refused(f"codex: {exc}") from None
+    name = (clean(thread.get("name")).strip() or agent.session_id[:8]) if isinstance(thread, dict) else None
+    if not isinstance(thread, dict) or thread.get("id") != agent.session_id or name != agent.name:
+        raise Refused("that id no longer belongs to a thread of that name")
+
+
+def _claude_session(agent, include_quit):
+    for session in claude_src.list_sessions(include_quit=include_quit):
+        if session["session_id"] == agent.session_id:
+            return session
+    return None
+
+
+def quit_agent(agent):
+    """Stop or archive an agent so it can be resumed later. Nothing is deleted."""
+    if agent.quit:
+        raise Refused("that agent is already quit")
+    if agent.spawned:
+        retire(agent)                              # spawn-peer's own path, so the spawn record notes it
+        return "quit. Resume brings it back"
+    if agent.pane_id:
+        raise Refused("it runs in a pane, so quit it there")
+    if agent.kind == "codex":
+        _check_codex(agent)
+        _attempt(agent, "quit")
+        try:
+            _codex_rpc("thread/archive", {"threadId": agent.session_id})
+        except CodexError as exc:
+            _result(agent, "quit", "error", error=str(exc)[:200])
+            raise Refused(f"archive failed: {exc}") from None
+        _result(agent, "quit", "archived")
+        return "quit: archived. Resume brings it back"
+    if not agent.background or not SHORT_ID.fullmatch(agent.short_id or ""):
+        raise Refused("an interactive Claude session ends only when its own terminal is closed")
+    try:
+        session = _claude_session(agent, include_quit=False)
+    except SourceError as exc:
+        raise Refused(str(exc)) from None
+    if not session or session["name"] != agent.name or session["short_id"] != agent.short_id:
+        raise Refused("that session is no longer running under that name")
+    _attempt(agent, "quit")
+    binary = os.environ.get("CLAUDE_BIN") or "claude"
+    try:
+        done = subprocess.run([binary, "stop", agent.short_id], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _result(agent, "quit", "error", error=type(exc).__name__)
+        raise Refused(f"claude stop failed: {type(exc).__name__}") from None
+    if done.returncode != 0:
+        _result(agent, "quit", "error", error=done.stderr.strip()[-200:])
+        raise Refused("claude stop failed")
+    _result(agent, "quit", "stopped")
+    return "quit: stopped. Resume brings it back"
+
+
+def _note_resumed(agent):
+    """For an agent spawn-peer created, record the resume in its spawn record, or the menu and
+    retire-peer would go on treating it as retired. Returns an extra note for the owner."""
+    if not agent.spawned:
+        return ""
+    try:
+        spawn_log.append({"time_utc": spawn_log.now(), "event": "resumed", "kind": agent.kind,
+                          "id": agent.session_id if agent.kind == "codex" else agent.short_id,
+                          "resumed_by": "owner/agent-menu"})
+    except OSError:
+        return " (the spawn record could not be updated, so it may still show as retired)"
+    return ""
+
+
+def resume(agent):
+    """Bring a quit agent back and open it in a new window, right after the current one."""
+    if not agent.quit:
+        raise Refused("that agent is not quit")
+    if agent.kind == "codex":
+        _check_codex(agent)
+        _attempt(agent, "resume")
+        try:
+            _codex_rpc("thread/unarchive", {"threadId": agent.session_id})
+        except CodexError as exc:
+            _result(agent, "resume", "error", error=str(exc)[:200])
+            raise Refused(f"unarchive failed: {exc}") from None
+        binary = os.environ.get("CODEX_BIN") or "codex"
+        try:
+            tmux_src.new_window(agent.name[:20], f"{shlex.quote(binary)} resume {agent.session_id}", cwd=agent.cwd)
+        except SourceError as exc:
+            _result(agent, "resume", "unarchived, window failed", error=str(exc))
+            raise Refused(f"unarchived, but its window could not open: {exc}") from None
+        _result(agent, "resume", "unarchived and opened")
+        return "resumed in a new window" + _note_resumed(agent)
+    if not SHORT_ID.fullmatch(agent.short_id or ""):
+        raise Refused("this session has no usable id")
+    try:
+        session = _claude_session(agent, include_quit=True)
+    except SourceError as exc:
+        raise Refused(str(exc)) from None
+    if not session or not session["quit"] or session["name"] != agent.name:
+        raise Refused("that session is no longer stopped under that name")
+    _attempt(agent, "resume")
+    binary = os.environ.get("CLAUDE_BIN") or "claude"
+    try:
+        tmux_src.new_window(agent.name[:20], f"{shlex.quote(binary)} attach {agent.short_id}")
+    except SourceError as exc:
+        _result(agent, "resume", "error", error=str(exc))
+        raise Refused(str(exc)) from None
+    _result(agent, "resume", "attached in a new window")
+    return "resumed in a new window" + _note_resumed(agent)
+
+
 def perform(agent, button, text=""):
     """Run one popup button. Returns (note for the owner, succeeded?, close the popup?).
     Nothing that goes wrong here may crash the popup: the owner is told instead."""
-    actions = {"Open pane": (open_pane, True), "Attach": (attach, True), "Retire": (retire, False)}
-    if button in ("Send", "Retire") and os.environ.get("AGENT_MENU_LOOK_ONLY"):
+    actions = {"Open pane": (open_pane, True), "Attach": (attach, True),
+               "Quit agent": (quit_agent, False), "Resume": (resume, True)}
+    if button in ("Send", "Quit agent") and os.environ.get("AGENT_MENU_LOOK_ONLY"):
         return "not done: look-only mode", False, False      # refused here too, not only hidden in the popup
     try:
         if button == "Send":

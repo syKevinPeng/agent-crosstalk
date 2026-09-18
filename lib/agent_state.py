@@ -21,6 +21,7 @@ class Agent:
     state: str = "unknown"        # working | idle | stopped | needs_owner | unknown
     model: str = ""               # only where the CLI reports one: Codex does, Claude does not
     pid: int = 0                  # the session's own process, where the CLI reports one
+    quit: bool = False            # stopped (Claude) or archived (Codex); Resume brings it back
     background: bool = False
     needs_owner: int = 0
     auth: str = ""                # auth label, e.g. "ssh key passphrase"
@@ -40,6 +41,7 @@ class Snapshot:
     roots: list
     by_key: dict
     errors: list                  # e.g. ["codex: unreachable"]
+    quit_agents: list = dataclasses.field(default_factory=list)   # shown apart, below the tree
 
 
 def title_names(kind, title):
@@ -113,6 +115,18 @@ def _match_panes(agents, panes):
             agent.pane_id, agent.pane_pid, agent._title = pane["pane_id"], pane["pid"], pane["title"]
 
 
+def _mark_spawned(agents, spawned):
+    """Spawn flags only, for quit agents: they are not placed in the tree, but Quit and Resume
+    still need to know which spawn record they belong to."""
+    by_id = {a.session_id: a for a in agents}
+    by_short = {a.short_id: a for a in agents if a.short_id}
+    for record in spawned:
+        agent = by_id.get(record["id"]) or by_short.get(record["id"])
+        if agent:
+            agent.spawned, agent.access = True, record["access"]
+            agent.retired = record["retired_at"] is not None
+
+
 def _link_parents(agents, spawned):
     by_id = {a.session_id: a for a in agents}
     by_short = {a.short_id: a for a in agents if a.short_id}
@@ -144,7 +158,7 @@ def _link_parents(agents, spawned):
             walker = by_key[walker.parent_key]
 
 
-def collect(now=None):
+def collect(now=None, include_quit=False):
     now = now or datetime.datetime.now(datetime.timezone.utc)
     errors, raw = [], []
     try:
@@ -153,8 +167,8 @@ def collect(now=None):
         spawned, _ = [], errors.append("spawn log: unreadable")
     recent_ids = [s["id"] for s in spawned if s["kind"] == "codex"
                   and (s["retired_at"] is None or now - s["retired_at"] < RETIRED_VISIBLE)]
-    for label, reader in (("claude", claude_src.list_sessions),
-                          ("codex", lambda: codex_src.list_threads(extra_ids=recent_ids))):
+    for label, reader in (("claude", lambda: claude_src.list_sessions(include_quit=include_quit)),
+                          ("codex", lambda: codex_src.list_threads(extra_ids=recent_ids, include_quit=include_quit))):
         try:
             raw.extend(reader())
         except SourceError:
@@ -170,9 +184,13 @@ def collect(now=None):
                       session_id=entry["session_id"], short_id=entry.get("short_id") or "",
                       cwd=entry.get("cwd") or "", state=entry["state"], model=entry.get("model") or "", background=entry.get("background", False))
         agent.pid, agent._title = entry.get("pid") or 0, ""
+        agent.quit = bool(entry.get("quit"))
         agents.append(agent)
+    quit_agents = [a for a in agents if a.quit]
+    agents = [a for a in agents if not a.quit]     # a quit agent has no process, pane or place in the tree
     _match_panes(agents, panes)
     _link_parents(agents, spawned)
+    _mark_spawned(quit_agents, spawned)
 
     try:
         open_counts = logs_src.open_messages()
@@ -207,10 +225,15 @@ def collect(now=None):
             continue
         visible.append(agent)
 
-    by_key = {a.key: a for a in visible}
+    open_counts_quit = open_counts
+    for agent in quit_agents:
+        agent.open_messages = open_counts_quit.get(agent.session_id, 0)
+    quit_agents.sort(key=lambda a: a.name.lower())
+    by_key = {a.key: a for a in visible + quit_agents}
+    in_tree = {a.key: a for a in visible}
     roots = []
     for agent in visible:
-        parent = by_key.get(agent.parent_key)
+        parent = in_tree.get(agent.parent_key)       # only a live agent can hold children
         (parent.children if parent else roots).append(agent)
 
     def urgency(a):
@@ -218,13 +241,13 @@ def collect(now=None):
     for agent in visible:
         agent.children.sort(key=urgency)
     roots.sort(key=urgency)
-    return Snapshot(roots=roots, by_key=by_key, errors=errors)
+    return Snapshot(roots=roots, by_key=by_key, errors=errors, quit_agents=quit_agents)
 
 
-def safe_collect():
+def safe_collect(include_quit=False):
     """collect(), or a snapshot that says the refresh failed. The menu must never keep showing the
     last good tree as if it were current, and one bad refresh must not end the sidebar."""
     try:
-        return collect()
+        return collect(include_quit=include_quit)
     except Exception as exc:
         return Snapshot(roots=[], by_key={}, errors=[f"refresh failed: {type(exc).__name__}"])
