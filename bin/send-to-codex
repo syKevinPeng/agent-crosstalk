@@ -45,7 +45,8 @@ Exit status:
   4  not sent: `codex queue` failed (its own status is in the log), or the log
      or a required program is missing
   6  queued and logged, but no turn has taken it and none will without help
-130  interrupted during the delivery check; the send is logged as interrupted
+130  interrupted (143 for SIGTERM) during the delivery check; the send is logged
+     as interrupted
 EOF
 }
 

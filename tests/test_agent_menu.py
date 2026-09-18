@@ -465,6 +465,14 @@ class AgentMenuTest(unittest.TestCase):
         self.assertNotIn("thread/archive", self.daemon.methods())
         self.assertEqual(self.m.actions(), [])
 
+    def test_an_enter_held_back_says_why_in_the_popup(self):
+        """A pasted instruction is not sent by the Enter right behind it. The popup must say so, or the
+        Enter looks broken."""
+        self.codex_thread(CODEX_P, "builder")
+        shown = self.popup_session(f"codex:{CODEX_P}", [(b"i", 0.4), (b"fix it", 0.2), (b"\r", 0.8), (b"\x1b", 0.4)],
+                                   b"builder")
+        self.assertIn(b"looked pasted", shown)
+
     def test_the_first_key_of_a_paste_presses_nothing(self):
         """The burst rule judges a key by the one before it, so the first key of a paste looks typed.
         Pasted into a quit thread's popup, "resume it tomorrow" starts with the Resume hotkey; the keys

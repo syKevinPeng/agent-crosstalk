@@ -374,26 +374,19 @@ class RealTmuxFormatTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory(prefix="rt")
         self.addCleanup(self._tmp.cleanup)
-        self.socket = f"agentmenu-test-{os.getpid()}"
-        self.tmux = ["tmux", "-L", self.socket, "-f", "/dev/null"]
+        self.socket = str(Path(self._tmp.name) / "tmux.sock")       # in the test's own folder, never shared
+        self.tmux = ["tmux", "-S", self.socket, "-f", "/dev/null"]
         subprocess.run(self.tmux + ["new-session", "-d", "-s", "t", "-x", "80", "-y", "24", "sleep 60"], check=True)
         self.addCleanup(self.stop_server)
         wrapper = Path(self._tmp.name) / "tmux-private"
-        wrapper.write_text(f"#!/usr/bin/env bash\nexec tmux -L {self.socket} -f /dev/null \"$@\"\n")
+        wrapper.write_text(f"#!/usr/bin/env bash\nexec tmux -S {self.socket} -f /dev/null \"$@\"\n")
         wrapper.chmod(0o755)
         patcher = mock.patch.dict(os.environ, {"TMUX_BIN": str(wrapper)})
         patcher.start()
         self.addCleanup(patcher.stop)
 
     def stop_server(self):
-        path = subprocess.run(self.tmux + ["display-message", "-p", "#{socket_path}"],
-                              capture_output=True, text=True).stdout.strip()
-        subprocess.run(self.tmux + ["kill-server"], capture_output=True)
-        if path and os.path.basename(path) == self.socket:
-            try:
-                os.unlink(path)                       # tmux leaves the socket file behind
-            except OSError:
-                pass
+        subprocess.run(self.tmux + ["kill-server"], capture_output=True)   # its socket goes with the temp folder
 
     def attach_client(self):
         """display-popup needs an attached client. A pty gives it one."""

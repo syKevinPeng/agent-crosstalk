@@ -178,6 +178,8 @@ def run(screen, key):
         note = ""
         was_armed = state.confirm
         state, chosen = menu_popup.step(state, offered, event, page=max(height - 7, 1), now=time.monotonic())
+        if state.held:
+            note = state.held                               # a key held back for safety says why
         if state.confirm and not was_armed:
             curses.flushinp()                               # whatever was pasted along with the arming key is dropped
         if not chosen:

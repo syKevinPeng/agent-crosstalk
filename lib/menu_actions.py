@@ -37,7 +37,7 @@ def log_path():
 def _attempt(agent, action, **extra):
     """Record the intent first. If that fails, the action does not happen."""
     try:
-        os.makedirs(os.path.dirname(log_path()) or ".", exist_ok=True)
+        private_log.private_folder(os.path.dirname(log_path()))
         _log(agent, action, "attempt", **extra)
     except OSError:
         raise Refused("the action log cannot be written, so nothing was done") from None
@@ -324,6 +324,9 @@ def resume(agent):
         raise Refused("that agent is not quit")
     if agent.kind == "codex":
         _check_codex(agent)
+        # Judged before anything is written: the record's own resume line below tightens its permissions,
+        # and a record that was open to others must not look trusted because of that.
+        flags = " ".join(shlex.quote(a) for a in codex_delivery.resume_args(agent.session_id))
         _attempt(agent, "resume")
         try:
             _codex_rpc("thread/unarchive", {"threadId": agent.session_id})
@@ -334,7 +337,6 @@ def resume(agent):
         binary = os.environ.get("CODEX_BIN") or "codex"
         try:
             # A spawned agent resumes with its spawn's own settings: your config.toml defaults can be wider.
-            flags = " ".join(shlex.quote(a) for a in codex_delivery.resume_args(agent.session_id))
             tmux_src.new_window(agent.name[:20], f"{shlex.quote(binary)} resume {flags + ' ' if flags else ''}"
                                 f"{agent.session_id}", cwd=agent.cwd)
         except SourceError as exc:

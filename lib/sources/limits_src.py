@@ -7,8 +7,8 @@ Two sources, both read-only and both free:
   reports zero tokens and zero cost. Its text is written for a person, so every line is matched on
   its own and a line that does not match is dropped rather than guessed at.
 
-The Claude call leaves a transcript file behind, so it runs in a folder of our own and the menu
-asks for it rarely. Nothing here reads a credential: both tools use the owner's existing login.
+The Claude call runs with no hooks, MCP servers or folder settings and saves no transcript, in a
+private folder of its own. Nothing here reads a credential: both tools use your existing login.
 """
 import datetime
 import json

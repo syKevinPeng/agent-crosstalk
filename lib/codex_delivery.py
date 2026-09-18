@@ -84,6 +84,10 @@ def resume_args(thread_id):
     origin = origin_record(thread_id)
     if origin is None:
         return []
+    # The same guards as a wake. A record others can write, or a protected folder, says nothing that can
+    # be trusted about the settings, so the strictest ones are used and no folder is passed.
+    if not spawn_log.trusted() or not origin.get("cwd") or spawn_log.is_protected(origin["cwd"]):
+        return ["-s", "read-only", "-a", "never"]
     approvals = spawn_log.CODEX_APPROVALS.get(origin.get("approvals")) or {"approvalPolicy": "never"}
     args = ["-s", spawn_log.CODEX_SANDBOX.get(origin.get("access"), "read-only"), "-a", approvals["approvalPolicy"]]
     if approvals.get("approvalsReviewer"):

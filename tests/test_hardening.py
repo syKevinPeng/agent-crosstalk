@@ -177,6 +177,11 @@ class PrivateLogsTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(mode(log), 0o600)
 
+    def test_the_menu_log_folder_is_private_when_an_action_creates_it(self):
+        with mock.patch.dict(os.environ, {"AGENT_MENU_ACTIONS_LOG": str(self.tmp / "new" / "menu.jsonl")}):
+            menu_actions._attempt(agent_state.Agent(key="k", kind="codex", name="n", session_id="s"), "test")
+        self.assertEqual(mode(self.tmp / "new"), 0o700)
+
     def test_spawn_record_and_menu_log_are_private(self):
         with mock.patch.dict(os.environ, {"AGENT_COMMS_SPAWN_LOG": str(self.tmp / "sub" / "spawned.jsonl"),
                                           "AGENT_MENU_ACTIONS_LOG": str(self.tmp / "sub2" / "menu.jsonl")}):
@@ -281,10 +286,36 @@ class ResumeSettingsTest(unittest.TestCase):
     def test_unknown_approvals_resume_with_the_strictest(self):
         self.assertIn("-s read-only -a never -C /w/kid", self.resume_call(approvals=None))
 
+    def test_an_untrusted_record_or_protected_folder_resumes_with_the_strictest(self):
+        # The same guards as the wake: a record others can write, or a protected folder, says nothing
+        # trustworthy about the settings, so the strictest ones are used and no folder is passed.
+        call = self.resume_call(approvals="auto-review", access="write")
+        os.chmod(self.m.dir / "spawned.jsonl", 0o602)
+        agent = agent_state.Agent(key=f"codex:{THREAD}", kind="codex", name="kid", session_id=THREAD,
+                                  cwd="/w/kid", quit=True, spawned=True, retired=True)
+        self.daemon.archived.add(THREAD)
+        menu_actions.resume(agent)
+        latest = [c for c in self.m.tmux_calls() if c.startswith("new-window")][-1]
+        self.assertIn(f"resume -s read-only -a never {THREAD}", latest)
+        self.assertIn("-s workspace-write", call)                 # while the record was private
+
     def test_a_thread_you_started_yourself_resumes_as_before(self):
         call = self.resume_call()
         self.assertNotIn(" -s ", call)
         self.assertTrue(call.endswith(f"resume {THREAD}"), call)
+
+
+class DryRunTest(unittest.TestCase):
+    def test_a_read_only_claude_dry_run_shows_every_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp) / "work"
+            work.mkdir()
+            proc = subprocess.run([sys.executable, str(BIN / "spawn-peer"), "--dry-run", "--cwd", str(work), "claude",
+                                   "peer", "codex/t", "hello"], capture_output=True, text=True, timeout=30,
+                                  env=dict(os.environ, HOME=tmp))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("--setting-sources user", proc.stdout)
+        self.assertIn("--disallowedTools", proc.stdout)
 
 
 class RawTextTest(unittest.TestCase):

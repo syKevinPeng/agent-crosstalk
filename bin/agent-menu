@@ -23,7 +23,7 @@ from sources import limits_src, tmux_src  # noqa: E402
 from sources.base import SourceError  # noqa: E402
 
 REFRESH_SECONDS = 2.0
-LIMITS_SECONDS = 15 * 60   # rate limits move slowly, and each Claude reading leaves a transcript file
+LIMITS_SECONDS = 15 * 60   # rate limits move slowly, and each Claude reading starts a `claude` process
 TICK_MS = 150
 # tmux starts the popup with the server's environment, not this process's. These settings decide what
 # the popup offers (look-only mode above all) and which logs and programs it uses, so the popup's

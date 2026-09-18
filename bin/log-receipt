@@ -12,7 +12,7 @@ Usage: log-receipt <msg_id> <confirmed_by> <evidence>
   evidence      One line: what shows receipt, e.g. "reply REVIEW-006 cites the Msg-ID".
 
 Environment:
-  AGENT_COMMS_LOG  JSONL log file (default: <agent-comms>/log/messages.jsonl)
+  AGENT_COMMS_LOG  JSONL log file (default: <repo>/log/messages.jsonl)
 
 Exit status: 0 logged; 2 usage error; 3 no successful send with this msg_id in the log; 1 append failed.
 EOF

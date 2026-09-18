@@ -26,7 +26,7 @@ You run a Claude session and a Codex session side by side. You want one to revie
 
 - Linux. The tools read `/proc` and check socket peers with `SO_PEERCRED`.
 - Python 3.9 or newer, standard library only. Tested on 3.9, 3.11 and 3.12.
-- bash, `jq`, `flock` and GNU coreutils.
+- bash, `jq`, `flock`, `awk` and GNU coreutils.
 - Claude Code, Codex CLI, or both. Checked against Claude Code 2.1.276 and codex-cli 0.154.0. With only one installed, the other side simply stays empty.
 - For the agent menu: tmux 3.2 or newer. The pane highlight wants 3.4, which is what it was tested on.
 
@@ -52,7 +52,7 @@ Two of the interfaces used here are not documented as stable: the Codex app-serv
 
    ```bash
    send-to-claude --list        # Claude sessions: UUID, name, folder
-   codex agents                 # Codex sessions
+   codex agents                 # Codex sessions, in an interactive browser
    ```
 
 4. Look at a message before sending it. `--dry-run` contacts nothing.
@@ -100,10 +100,10 @@ Tools are in <path to agent-crosstalk>/bin. Read its README before sending.
 
 | Tool | What it does | Exit codes worth knowing |
 | --- | --- | --- |
-| `send-to-codex` | Queues a message for a Codex session, wakes a spawned agent the daemon unloaded, and waits until a turn takes it | 0 delivered or held, 6 queued but no turn took it, 4 not sent |
+| `send-to-codex` | Queues a message for a Codex session, wakes a spawned agent the daemon unloaded, and waits until a turn takes it | 0 delivered or held, 6 queued but no turn confirmed, 4 not sent |
 | `send-to-claude` | Writes a message to a Claude session's inbox socket after checking the socket's owner | 0 written, 3 identity check failed, 4 socket error |
 | `log-receipt` | Records that a reply cited a `Msg-ID` | 0 logged, 3 no such send |
-| `spawn-peer` | Starts a named, recorded Claude or Codex agent, read-only by default | 0 created, 3 refused, 5 created but its first message was not delivered |
+| `spawn-peer` | Starts a named, recorded Claude or Codex agent, read-only by default | 0 created, 3 refused, 4 failed (an agent may still exist, see the reference), 5 created but its first message was not delivered |
 | `retire-peer` | Archives or stops an agent `spawn-peer` created, and nothing else | 0 done, 3 refused |
 | `codex-reply` | Prints a Codex agent's latest answer. Read-only | 0 printed, 5 still running, 6 a newer message is still queued |
 | `agent-menu` | The tmux sidebar. `--once` prints the tree as text | |
@@ -127,7 +127,9 @@ Read [SECURITY.md](SECURITY.md) for the threat model, what these guards do not c
 
 A send that worked is not a message that arrived. `codex queue` only stores a message, and the Codex daemon starts a turn from the queue only while it has that thread loaded. It unloads an idle thread about a minute after the last client leaves. A spawned agent has no terminal attached, so a later message would sit in the queue with nothing to say so.
 
-`send-to-codex` handles this. It loads such an agent again first, with its recorded settings, then watches the queue until a turn takes the message, and reports `started`, `waiting`, `not-loaded`, `stuck` or `unknown`. Anything short of a turn is exit 6. `codex-reply` exits 6 as well when a message is still queued, so a stuck agent never looks like a slow one.
+`send-to-codex` handles this. It loads such an agent again first, with its recorded settings, then watches the queue until a turn takes the message, and says what happened. When no turn is confirmed to take it, the tool exits 6 and says why, and the log's `delivery` field records `started`, `waiting`, `not-loaded`, `stuck` or `unknown`. `codex-reply` exits 6 as well when a message is still queued, so a stuck agent never looks like a slow one.
+
+The Codex tools talk to Codex's local app-server daemon. If the sidebar shows `codex: daemon not running`, start it with `codex app-server daemon start`.
 
 Receipts close the loop. The receiver cites the `Msg-ID` in its answer, or sends `ACK <Msg-ID>: <when>` if the answer comes later, and you record it with `log-receipt`. The [reference](docs/reference.md#receipts) has a one-line query for messages that still have no receipt.
 

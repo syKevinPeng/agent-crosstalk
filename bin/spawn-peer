@@ -181,7 +181,8 @@ def main(argv):
             print(f"Requests: thread/list, thread/start (sandbox {CODEX_SANDBOX[access]}, {policy}), "
                   "thread/name/set")
         else:
-            deny = f" --disallowedTools {CLAUDE_READ_ONLY_DENY!r}" if access == "read-only" else ""
+            deny = (f" --setting-sources user --disallowedTools {CLAUDE_READ_ONLY_DENY!r}"
+                    if access == "read-only" else "")
             print(f"Command: {claude_bin()} --bg -n {args.name!r} --permission-mode {CLAUDE_MODE[access]}{deny} -- <first message>")
         return 0
 
