@@ -4,15 +4,21 @@ Let the Claude Code and Codex CLI agents on your machine talk to each other, and
 
 ```
  AGENTS  1 need you · 3 unanswered
- ▾ lead session         claude !1
-   ├ peer-check      ro codex ⠋
-   └ fix-review      rw codex ✉3
-   builder               codex ✓
- ──────────────────────────────
- LIMITS              as of 18:21
-  claude session █░░░░░    18% 1h
-  codex week     ████░░    76% 4d
+ ▾ lead session    claude    ~/code/webapp                  ⠋
+   ├ peer-check    ro codex  ~/code/webapp     gpt-5.5      ⠋
+   └ fix-review    rw codex  ~/code/webapp     gpt-5.5     ✉3
+   docs writer     claude    ~/code/docs                   !1
+   builder         codex     ~/code/api        gpt-5.5      ✓
+   notebook        claude    ~/notes                        ?
+──────────────────────────────────────────────────────────────
+ LIMITS                                           as of 18:21
+  claude session ██████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    18% 1h
+  claude week    ███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    11% 6d
+   └ Fable       █████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    16% 6d
+  codex week     ██████████████████████████░░░░░░░░░    76% 4d
 ```
+
+The sidebar in its wide layout, 62 columns. Press `w` to switch between that and a narrow strip.
 
 You run a Claude session and a Codex session side by side. You want one to review the other's work, hand off a task, or ask a blocking question, and you want to know whether the message actually arrived. This repository is a set of small command-line tools for exactly that, plus a sidebar that shows every agent, who spawned whom, and which one is waiting for you.
 

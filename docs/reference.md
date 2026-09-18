@@ -337,11 +337,11 @@ Every two seconds the sidebar reads local state only: `claude agents --json`, th
 A block under the tree shows how much of each rate limit is used.
 
 ```
- LIMITS              as of 18:21
-  claude session █░░░░░    18% 1h
-  claude week    █░░░░░    11% 6d
-   └ Fable       █░░░░░    16% 6d
-  codex week     ████░░    76% 4d
+ LIMITS                                           as of 18:21
+  claude session ██████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    18% 1h
+  claude week    ███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    11% 6d
+   └ Fable       █████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    16% 6d
+  codex week     ██████████████████████████░░░░░░░░░    76% 4d
 ```
 
 - **Where the numbers come from.** Claude Code answers `claude -p --output-format json --safe-mode --no-session-persistence --setting-sources user "/usage"`. That runs no model and costs nothing, runs no hooks, MCP servers or folder settings, and leaves no transcript. It runs in a private folder, `log/usage-calls` unless `AGENT_MENU_USAGE_CWD` says otherwise. Codex answers `account/rateLimits/read` on its local daemon. Both use your existing login. Nothing here reads a credential file.

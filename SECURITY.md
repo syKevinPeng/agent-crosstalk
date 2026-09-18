@@ -4,7 +4,7 @@ agent-crosstalk passes messages between AI agents on one machine and can start a
 
 ## Reporting a problem
 
-Please report a vulnerability privately, not in a public issue: use GitHub's private vulnerability reporting on this repository if it is turned on, or write to the maintainer through the contact on their GitHub profile. Include the tool, the commit, what you did and what happened.
+Please report a vulnerability privately, not in a public issue: use "Report a vulnerability" on this repository's Security tab. Include the tool, the commit, what you did and what happened.
 
 ## Threat model
 
