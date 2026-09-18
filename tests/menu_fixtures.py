@@ -27,10 +27,38 @@ TMUX_STUB = r"""#!/usr/bin/env bash
 d="$STUB_DIR"; printf '%s\n' "$*" >> "$d/tmux-calls.txt"
 [[ -n ${STUB_TMUX_FAIL:-} ]] && { echo "no server running" >&2; exit 1; }
 target=""; args=("$@"); for ((i=0;i<${#args[@]};i++)); do [[ ${args[i]} == -t ]] && target=${args[i+1]}; done
+# Options are kept as files, as tmux 3.4 scopes them: popt-<pane number>-<name> on a pane, wopt-<window
+# number>-<name> on a window (window-N files say which window pane N is in, default @1), and gopt-<name>
+# for the global value a window inherits. Tests read a pane's and a window's end state from them.
+[[ -n $target && -f "$d/gone-${target#%}" ]] && { echo "can't find pane: $target" >&2; exit 1; }
+win_of() { if [[ -f "$d/window-$1" ]]; then cat "$d/window-$1"; else echo "@1"; fi; }
+scope=p; inherited=0; unset_=0; pos=()
+for ((i=1;i<${#args[@]};i++)); do
+  case ${args[i]} in -p) scope=p ;; -w) scope=w ;; -A) inherited=1 ;; -u) unset_=1 ;; -q|-v|-a) ;;
+    -t|-F) i=$((i+1)) ;; *) pos+=("${args[i]}") ;; esac
+done
+if [[ $scope == w ]]; then file="$d/wopt-${target#@}-${pos[0]}"; else file="$d/popt-${target#%}-${pos[0]}"; fi
 case $1 in
-  list-panes) cat "$d/panes.tsv" ;;
+  list-panes) if [[ " $* " == *"@agent_menu_highlight"* ]]; then
+                for f in "$d"/popt-*-@agent_menu_highlight; do
+                  [[ -f $f ]] || continue
+                  n=${f#"$d/popt-"}; n=${n%%-@agent_menu_highlight}
+                  [[ -n $target && $(win_of "$n") != "$target" ]] && continue
+                  printf '%%%s\t%s\n' "$n" "$(cat "$f")"
+                done
+              else cat "$d/panes.tsv"; fi ;;
+  list-windows) for f in "$d"/wopt-*-@agent_menu_highlight_window; do
+                  [[ -f $f ]] || continue
+                  n=${f#"$d/wopt-"}; printf '@%s\t%s\n' "${n%%-@agent_menu_highlight_window}" "$(cat "$f")"
+                done ;;
   capture-pane) cat "$d/screen-${target#%}.txt" 2>/dev/null ;;
-  display-message) if [[ -f "$d/pid-${target#%}.txt" ]]; then cat "$d/pid-${target#%}.txt"; else echo "can't find pane" >&2; exit 1; fi ;;
+  display-message) if [[ " $* " == *"window_id"* ]]; then win_of "${target#%}"
+                   elif [[ -f "$d/pid-${target#%}.txt" ]]; then cat "$d/pid-${target#%}.txt"
+                   else echo "can't find pane" >&2; exit 1; fi ;;
+  show-options) if [[ -f $file ]]; then cat "$file"; echo
+                elif ((inherited)); then if [[ -f "$d/gopt-${pos[0]}" ]]; then cat "$d/gopt-${pos[0]}"; echo; else echo default; fi
+                fi ;;
+  set-option) if ((unset_)); then rm -f "$file"; else printf '%s' "${pos[1]}" > "$file"; fi ;;
   *) : ;;
 esac
 """
@@ -138,6 +166,16 @@ class Machine:
         with open(self.dir / name, "a") as fh:
             for record in records:
                 fh.write((record if isinstance(record, str) else json.dumps(record)) + "\n")
+
+    def pane_options(self, number):
+        """The options a pane sets itself, as the stub tmux keeps them."""
+        prefix = f"popt-{number}-"
+        return {f.name[len(prefix):]: f.read_text() for f in self.dir.glob(prefix + "*")}
+
+    def window_options(self, number=1):
+        """The options a window sets itself (window @1 unless a test moved a pane elsewhere)."""
+        prefix = f"wopt-{number}-"
+        return {f.name[len(prefix):]: f.read_text() for f in self.dir.glob(prefix + "*")}
 
     def tmux_calls(self):
         path = self.dir / "tmux-calls.txt"
