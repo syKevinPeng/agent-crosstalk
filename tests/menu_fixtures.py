@@ -11,12 +11,12 @@ from test_peers import FakeCodexDaemon  # noqa: E402,F401
 
 USAGE_TEXT = """You are currently using your subscription to power your Claude Code usage
 
-Current session: 18% used · resets Sep 17, 7:40pm (America/New_York)
-Current week (all models): 11% used · resets Sep 24, 1pm (America/New_York)
-Current week (Fable): 16% used · resets Sep 24, 1pm (America/New_York)
+Current session: 18% used · resets Sep 18, 1:40am (Europe/Berlin)
+Current week (all models): 11% used · resets Sep 24, 7pm (Europe/Berlin)
+Current week (Fable): 16% used · resets Sep 24, 7pm (Europe/Berlin)
 
 What's contributing to your limits usage?
-Last 24h · 1347 requests · 8 sessions
+Last 24h · 212 requests · 3 sessions
 """
 
 ROOT = Path(__file__).resolve().parents[1]

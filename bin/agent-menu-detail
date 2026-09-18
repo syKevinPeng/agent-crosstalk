@@ -179,9 +179,11 @@ def run(screen, key):
             curses.flushinp()                               # whatever was pasted along with the arming key is dropped
         if not chosen:
             continue
-        if chosen in menu_popup.RISKY:
-            # One last guard against a paste whose chunk boundary happened to land on the confirm
-            # key: if more keys are already waiting, a person did not type this.
+        if chosen != "Send":
+            # The burst rule can only judge a key by the one before it, so the first key of a paste,
+            # or the first key after a chunk boundary, looks typed. If more keys are already waiting
+            # behind the key that acts, a person did not type it. The instruction line has its own
+            # rule for pastes (see menu_popup), so Send is left to that.
             screen.timeout(120)
             trailing = read_event(screen)
             screen.timeout(RELOAD_MS)

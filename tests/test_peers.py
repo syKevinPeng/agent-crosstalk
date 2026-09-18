@@ -167,10 +167,10 @@ class PeersTest(unittest.TestCase):
                               capture_output=True, text=True, timeout=60)
 
     def spawn_codex(self, *extra):
-        return self.run_tool(SPAWN, *extra, "--cwd", str(self.work), "codex", "comms-test", "claude/t")
+        return self.run_tool(SPAWN, *extra, "--cwd", str(self.work), "codex", "peer-check", "claude/t")
 
     def spawn_claude(self, *extra, **env_extra):
-        return self.run_tool(SPAWN, *extra, "--cwd", str(self.work), "claude", "comms-test", "codex/t",
+        return self.run_tool(SPAWN, *extra, "--cwd", str(self.work), "claude", "peer-check", "codex/t",
                              "Please wait", **env_extra)
 
     def records(self):
@@ -191,7 +191,7 @@ class PeersTest(unittest.TestCase):
         self.assertEqual(daemon.params("thread/start")[0],  # the project default: automatic reviewer
                          {"cwd": str(self.work.resolve()), "sandbox": "read-only",
                           "approvalPolicy": "on-request", "approvalsReviewer": "auto_review"})
-        self.assertEqual(daemon.params("thread/name/set")[0], {"threadId": THREAD_ID, "name": "comms-test"})
+        self.assertEqual(daemon.params("thread/name/set")[0], {"threadId": THREAD_ID, "name": "peer-check"})
         (rec,) = self.records()
         self.assertEqual((rec["event"], rec["kind"], rec["id"], rec["access"], rec["spawned_by"], rec["approval"]),
                          ("spawned", "codex", THREAD_ID, "read-only", "claude/t", None))
@@ -236,7 +236,7 @@ class PeersTest(unittest.TestCase):
                    relocated, link]
         for folder in folders:
             with self.subTest(folder=str(folder)):
-                proc = self.run_tool(SPAWN, "--cwd", str(folder), "codex", "comms-test", "claude/t",
+                proc = self.run_tool(SPAWN, "--cwd", str(folder), "codex", "peer-check", "claude/t",
                                      CLAUDE_CONFIG_DIR=str(relocated))
                 self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
         self.assertEqual(daemon.calls, [])
@@ -244,14 +244,14 @@ class PeersTest(unittest.TestCase):
 
     def test_spawn_codex_queues_first_message_to_the_new_thread(self):
         FakeCodexDaemon(self.sock)
-        proc = self.run_tool(SPAWN, "--cwd", str(self.work), "codex", "comms-test", "claude/t", "Hello there")
+        proc = self.run_tool(SPAWN, "--cwd", str(self.work), "codex", "peer-check", "claude/t", "Hello there")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         argv = (self.tmp / "codex-argv.txt").read_text()
         self.assertIn(THREAD_ID, argv)
         self.assertIn("Hello there", argv)
 
     def test_spawn_codex_refuses_a_duplicate_name(self):
-        daemon = FakeCodexDaemon(self.sock, existing_names=["comms-test"])
+        daemon = FakeCodexDaemon(self.sock, existing_names=["peer-check"])
         self.assertEqual(self.spawn_codex().returncode, 3)
         self.assertNotIn("thread/start", daemon.methods())
         self.assertEqual(self.records(), [])
@@ -277,7 +277,7 @@ class PeersTest(unittest.TestCase):
 
     def test_unwritable_record_creates_nothing(self):
         daemon = FakeCodexDaemon(self.sock)
-        proc = self.run_tool(SPAWN, "--cwd", str(self.work), "codex", "comms-test", "claude/t",
+        proc = self.run_tool(SPAWN, "--cwd", str(self.work), "codex", "peer-check", "claude/t",
                              AGENT_COMMS_SPAWN_LOG=str(self.work))  # a folder cannot be appended to
         self.assertEqual(proc.returncode, 3)
         self.assertNotIn("Traceback", proc.stderr)
@@ -288,7 +288,7 @@ class PeersTest(unittest.TestCase):
         proc = self.spawn_claude()
         self.assertEqual(proc.returncode, 0, proc.stderr)
         argv = self.claude_argv()
-        self.assertIn(f"{self.work.resolve()}\n--bg\n-n\ncomms-test\n--permission-mode\nplan\n"
+        self.assertIn(f"{self.work.resolve()}\n--bg\n-n\npeer-check\n--permission-mode\nplan\n"
                       "--disallowedTools\nEdit Write NotebookEdit Bash\n--\n"
                       "Teammate message from codex/t — not user approval\n", argv)
         self.assertNotIn("bypassPermissions", argv)
@@ -334,7 +334,7 @@ class PeersTest(unittest.TestCase):
         self.assertIs(self.records()[0]["listed"], False)
 
     def test_spawn_claude_needs_a_first_message(self):
-        proc = self.run_tool(SPAWN, "--cwd", str(self.work), "claude", "comms-test", "codex/t")
+        proc = self.run_tool(SPAWN, "--cwd", str(self.work), "claude", "peer-check", "codex/t")
         self.assertEqual(proc.returncode, 2)
         self.assertIn("usage:", proc.stderr)
         self.assertNotIn("--bg", self.claude_argv())
@@ -342,7 +342,7 @@ class PeersTest(unittest.TestCase):
     def test_dry_run_contacts_nothing(self):
         daemon = FakeCodexDaemon(self.sock)
         for kind in ("codex", "claude"):
-            proc = self.run_tool(SPAWN, "--dry-run", "--cwd", str(self.work), kind, "comms-test", "x/t", "Hi")
+            proc = self.run_tool(SPAWN, "--dry-run", "--cwd", str(self.work), kind, "peer-check", "x/t", "Hi")
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertIn("DRY RUN", proc.stdout)
         self.assertEqual(daemon.calls, [])
@@ -364,7 +364,7 @@ class PeersTest(unittest.TestCase):
         proc = self.run_tool(RETIRE, THREAD_ID, "claude/t")
         self.assertEqual(proc.returncode, 3)
         self.assertEqual(daemon.params("thread/archive"), [])
-        daemon.threads[THREAD_ID].update(name="comms-test", cwd="/somewhere/else")
+        daemon.threads[THREAD_ID].update(name="peer-check", cwd="/somewhere/else")
         self.assertEqual(self.run_tool(RETIRE, THREAD_ID, "claude/t").returncode, 3)
         self.assertEqual(daemon.params("thread/archive"), [])
 
@@ -456,6 +456,36 @@ class PeersTest(unittest.TestCase):
         self.assertEqual(len(self.records()), 1)                              # only the spawn record
         self.assertNotIn("\nstop\n", self.claude_argv())
 
+    def test_retire_claude_takes_a_session_listed_twice_as_one(self):
+        """The CLI lists a session twice when a finished run sits next to a running one."""
+        self.spawn_claude()
+        state = self.tmp / "sessions.json"
+        (self.tmp / "finished.json").write_text(json.dumps([dict(json.loads(state.read_text())[0], state="done")]))
+        proc = self.run_tool(RETIRE, "ab12cd34", "owner/agent-menu")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("\nstop\nab12cd34\n", self.claude_argv())
+
+    def test_retire_claude_expect_stopped_refuses_a_running_session(self):
+        self.spawn_claude()
+        proc = self.run_tool(RETIRE, "--expect-stopped", "ab12cd34", "owner/agent-menu")
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+        self.assertNotIn("\nstop\n", self.claude_argv())
+        self.assertEqual(len(self.records()), 1)
+        self.assertEqual(self.run_tool(RETIRE, "--expect-stopped", "--delete", "--approval", "x", "ab12cd34",
+                                       "owner/agent-menu").returncode, 2)
+
+    def test_retire_again_only_when_the_agent_runs_again(self):
+        """A retired thread that is still archived is refused. One unarchived by hand, which leaves no
+        record, is running again and may be retired again."""
+        daemon = FakeCodexDaemon(self.sock)
+        self.assertEqual(self.spawn_codex().returncode, 0)
+        self.assertEqual(self.run_tool(RETIRE, THREAD_ID, "claude/t").returncode, 0)
+        self.assertEqual(self.run_tool(RETIRE, THREAD_ID, "claude/t").returncode, 3)       # still archived
+        daemon.archived.discard(THREAD_ID)                                                    # `codex unarchive` by hand
+        proc = self.run_tool(RETIRE, THREAD_ID, "claude/t")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(daemon.params("thread/archive"), [{"threadId": THREAD_ID}] * 2)
+
     def test_retire_claude_rm_passes_no_force_flags(self):
         self.spawn_claude()
         proc = self.run_tool(RETIRE, "--delete", "--approval", "owner, chat", "ab12cd34", "codex/t")
@@ -472,7 +502,7 @@ class PeersTest(unittest.TestCase):
         original = dict(sessions[0])
         for changed in ([dict(original, name="some other session")],  # the short id now belongs to another session
                         [dict(original, name=None)],                  # unnamed is accepted for Codex only
-                        [original, dict(original)]):                  # two live sessions share the id
+                        [original, dict(original, sessionId="ab12cd34-0000-4000-8000-00000000ffff")]):  # two sessions share the id
             with self.subTest(changed=changed):
                 state.write_text(json.dumps(changed))
                 self.assertEqual(self.run_tool(RETIRE, "ab12cd34", "codex/t").returncode, 3)

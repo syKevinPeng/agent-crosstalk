@@ -1,5 +1,6 @@
 """Tests for quitting an agent and resuming it later. Nothing here deletes anything: Codex threads
 are archived and unarchived, Claude background sessions are stopped and attached again."""
+import datetime
 import json
 import os
 import sys
@@ -20,6 +21,11 @@ LIVE_CLAUDE = "aaaaaaaa-0000-4000-8000-000000000001"
 DONE_CLAUDE = "bbbbbbbb-0000-4000-8000-000000000002"
 LIVE_CODEX = "0d0d0d0d-0000-7000-8000-00000000000a"
 ARCHIVED_CODEX = "0e0e0e0e-0000-7000-8000-00000000000b"
+
+
+def spawn_stamp(minutes_ago):
+    when = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes_ago)
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class QuitResumeTest(unittest.TestCase):
@@ -277,6 +283,125 @@ class QuitResumeTest(unittest.TestCase):
                     "time_utc": "2999-01-01T00:00:00Z"})
         self.assertEqual(self.snap(include_quit=False).quit_agents, [])
         self.assertIn(f"claude:{DONE_CLAUDE}", [a.key for a in self.snap(include_quit=True).quit_agents])
+
+    # ---------- findings of the review of the merge (2026-09-17)
+
+    def spawned(self, kind, name, agent_id, **extra):
+        self.m.log("spawned.jsonl", dict({"event": "spawned", "kind": kind, "name": name, "id": agent_id, "cwd": "/w",
+                                          "access": "read-only", "spawned_by": "claude/x"}, **extra))
+
+    def test_a_resume_whose_window_fails_still_leaves_a_manageable_agent(self):
+        """The unarchive is what brings the thread back, so the resume is recorded right after it. If
+        the window then fails, the thread is live, keeps its buttons and its row, and can be quit again."""
+        self.spawned("codex", "idle thread", LIVE_CODEX, cwd=self.m.dir.as_posix())
+        key = f"codex:{LIVE_CODEX}"
+        menu_actions.quit_agent(self.agent(key))
+        with mock.patch.dict(os.environ, {"STUB_TMUX_FAIL": "1"}), self.assertRaises(menu_actions.Refused):
+            menu_actions.resume(self.agent(key))
+        events = [json.loads(line)["event"] for line in (self.m.dir / "spawned.jsonl").read_text().splitlines()]
+        self.assertEqual(events, ["spawned", "retired", "resumed"])
+        back = self.agent(key)
+        self.assertEqual((back.quit, back.retired), (False, False))
+        self.assertIn("Quit agent", menu_detail.buttons(back))
+        later = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=11)
+        self.assertIn(key, agent_state.collect(now=later).by_key)
+        menu_actions.quit_agent(back)
+        self.assertEqual(len(self.daemon.params("thread/archive")), 2)
+
+    def test_an_agent_brought_back_by_hand_counts_as_running(self):
+        """The README tells the owner that `claude attach` undoes a retire. That leaves no record, so a
+        running session must win over the record: buttons, a row that stays, and Quit working again."""
+        self.spawned("claude", "busy one", LIVE_CLAUDE[:8])
+        self.m.log("spawned.jsonl", {"event": "retired", "kind": "claude", "id": LIVE_CLAUDE[:8], "action": "stop",
+                                     "time_utc": "2026-01-01T00:00:00Z"})
+        agent = self.agent(f"claude:{LIVE_CLAUDE}", include_quit=False)
+        self.assertEqual((agent.quit, agent.retired), (False, False))
+        self.assertIn("Quit agent", menu_detail.buttons(agent))
+        menu_actions.quit_agent(agent)                                       # retire-peer sees it running again
+        self.assertIn(f"stop {LIVE_CLAUDE[:8]}", self.m.claude_calls())
+
+    def test_an_agent_resumed_and_then_finished_is_not_retired(self):
+        """Only the latest step counts, for the menu and for retire-peer alike. A spawned session that was
+        retired, resumed, and then finished on its own is stopped but not retired: it keeps its place,
+        and Quit records the retirement again."""
+        self.spawned("claude", "parked one", DONE_CLAUDE[:8])
+        self.m.log("spawned.jsonl",
+                   {"event": "retired", "kind": "claude", "id": DONE_CLAUDE[:8], "action": "stop",
+                    "time_utc": spawn_stamp(3)},
+                   {"event": "resumed", "kind": "claude", "id": DONE_CLAUDE[:8], "resumed_by": "owner/agent-menu",
+                    "time_utc": spawn_stamp(2)})
+        agent = self.agent(f"claude:{DONE_CLAUDE}", include_quit=False)
+        self.assertEqual((agent.quit, agent.retired, agent.parked), (True, False, False))
+        self.assertEqual(menu_detail.buttons(agent), ["Resume", "Quit agent"])
+        note, succeeded, _ = menu_actions.perform(agent, "Quit agent")
+        self.assertTrue(succeeded, note)
+        record = json.loads((self.m.dir / "spawned.jsonl").read_text().splitlines()[-1])
+        self.assertEqual((record["event"], record.get("already_stopped")), ("retired", True))
+
+    def test_a_record_only_quit_never_stops_a_session_that_came_back(self):
+        """The confirm promised a record only. If the session was attached again since the popup read it,
+        retire-peer refuses instead of stopping it."""
+        self.spawned("claude", "parked one", DONE_CLAUDE[:8])
+        agent = self.agent(f"claude:{DONE_CLAUDE}", include_quit=False)
+        self.assertIn("record it as retired", menu_detail.confirm_text(agent))
+        self.m.claude_finished.clear()
+        self.m.claude_session(DONE_CLAUDE, "parked one", 600)                # attached in another window meanwhile
+        self.m.write()
+        note, succeeded, _ = menu_actions.perform(agent, "Quit agent")
+        self.assertFalse(succeeded, note)
+        self.assertIn("running again", note)
+        self.assertFalse(any(c.startswith("stop") for c in self.m.claude_calls()))
+
+    def test_no_quit_while_any_pane_could_be_showing_the_thread(self):
+        """A thread gets a pane only when one pane fits it for certain. When two panes could be showing
+        it, it gets none, and Quit would archive a thread the owner has open."""
+        self.m.pane(4, 400, "codex", "idle thread | proj")
+        self.m.pane(5, 401, "codex", "idle thread | proj-copy")
+        self.m.write()
+        agent = self.agent(f"codex:{LIVE_CODEX}")
+        self.assertEqual((agent.pane_id, agent.maybe_in_pane), ("", True))
+        self.assertNotIn("Quit agent", menu_detail.buttons(agent))
+        self.assertIn("pane may be showing it", menu_detail.quit_note(agent))
+        with self.assertRaises(menu_actions.Refused):
+            menu_actions.quit_agent(agent)
+        self.assertEqual(self.daemon.params("thread/archive"), [])
+
+    def test_any_choice_menu_turns_the_instruction_line_off(self):
+        """Enter picks the highlighted option in any choice menu, not only Yes/No approvals."""
+        question = ("Which database should we use?\n\n❯ 1. PostgreSQL\n     Robust\n  2. SQLite\n"
+                    "  3. Type something.\n\nEnter to select · ↑/↓ to navigate · Esc to cancel\n")
+        for screen in (question, "❯ 1. PostgreSQL\n  2. SQLite\n", "pick one\nEnter to select · Esc to cancel\n"):
+            with self.subTest(screen=screen):
+                self.assertTrue(agent_state.waits_on_owner("", screen))
+        for screen in ("Plan:\n1. Read the tests\n2. Fix the bug\n", "❯ run the tests\n"):
+            with self.subTest(screen=screen):
+                self.assertFalse(agent_state.waits_on_owner("", screen))   # a list in the output, or typed text
+        self.m.claude_session("cccccccc-0000-4000-8000-000000000003", "at terminal", 900, background=False)
+        self.m.pane(3, 800, "claude", "✳ at terminal", screen=question)
+        self.m.process(900, 800)
+        self.m.write()
+        agent = self.agent("claude:cccccccc-0000-4000-8000-000000000003")
+        self.assertEqual((agent.pane_id != "", agent.needs_owner > 0), (True, True))
+        self.assertNotIn("Send", menu_detail.buttons(agent))
+        self.assertEqual(menu_actions.perform(agent, "Send", "wait, explain first")[1], False)
+        self.assertFalse(any(c.startswith("send-keys") for c in self.m.tmux_calls()))
+
+    def test_a_failed_lookup_of_stopped_sessions_is_reported(self):
+        """A stopped child dropped because `--all` could not be read must leave a line saying so, and
+        the live rows stay. An action that re-checks a session still refuses on the same failure."""
+        claude_src._finished.update(missing=frozenset(), at=float("-inf"), sessions=[])
+        self.spawned("claude", "parked one", DONE_CLAUDE[:8])
+        (self.m.dir / "claude-all.json").write_text("not json")
+        snap = self.snap(include_quit=False)
+        self.assertIn("claude: finished sessions unreadable", snap.errors)
+        self.assertIn(f"claude:{LIVE_CLAUDE}", snap.by_key)
+        snap = self.snap(include_quit=True)
+        self.assertIn("claude: quit sessions unreadable", snap.errors)
+        self.assertIn(f"claude:{LIVE_CLAUDE}", snap.by_key)
+        parked = agent_state.Agent(key=f"claude:{DONE_CLAUDE}", kind="claude", name="parked one",
+                                   session_id=DONE_CLAUDE, short_id=DONE_CLAUDE[:8], quit=True)
+        with self.assertRaises(menu_actions.Refused):
+            menu_actions.resume(parked)
 
     def test_a_live_agent_whose_parent_was_quit_stays_in_the_tree(self):
         self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "idle thread", "id": LIVE_CODEX,

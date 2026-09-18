@@ -42,10 +42,14 @@ def list_threads(extra_ids=(), timeout=1.5, include_quit=False):
         if not isinstance(listing, list):
             raise SourceError("codex: thread/list gave no list")   # this source fails, not the whole refresh
         threads = {t["id"]: _thread(t) for t in listing if isinstance(t, dict) and isinstance(t.get("id"), str)}
-        if include_quit:
-            archived = ws.rpc("thread/list", {"limit": 200, "archived": True}).get("data", [])
-            for raw in archived:
-                if isinstance(raw, dict) and isinstance(raw.get("id"), str):
+        # `thread/read` answers for an archived thread just as for a live one, so a recorded id that the
+        # live listing lacks is looked up in the archived listing first: only there does it show as quit.
+        missing = [i for i in extra_ids if i not in threads]
+        if include_quit or missing:
+            archived = ws.rpc("thread/list", {"limit": 200, "archived": True}).get("data")
+            for raw in archived if isinstance(archived, list) else []:
+                if isinstance(raw, dict) and isinstance(raw.get("id"), str) and raw["id"] not in threads \
+                        and (include_quit or raw["id"] in missing):
                     threads[raw["id"]] = dict(_thread(raw), quit=True, state="stopped")
         for thread_id in extra_ids:
             if thread_id in threads:

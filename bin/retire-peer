@@ -37,6 +37,24 @@ def claude_running(short_id):
     return any(isinstance(s, dict) and s.get("id") == short_id for s in sessions)
 
 
+def running_again(kind, agent_id):
+    """Is an agent whose last record says retired running after all? False when that cannot be read,
+    so a doubt keeps the refusal."""
+    try:
+        if kind == "claude":
+            return claude_running(agent_id)
+        ws = CodexWS()
+        try:
+            archived = ws.rpc("thread/list", {"limit": 200, "archived": True}).get("data")
+        finally:
+            ws.close()
+        if not isinstance(archived, list):
+            return False
+        return agent_id not in {t.get("id") for t in archived if isinstance(t, dict)}
+    except (CodexError, RuntimeError, OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+
+
 def check_same(what, live, recorded):
     # An unnamed Codex thread is accepted: spawn-peer records before it names.
     for field in ("name", "cwd"):
@@ -57,11 +75,16 @@ def main(argv):
                              "`claude rm` also deletes the session's worktree if it has one")
     parser.add_argument("--approval", default="",
                         help="with --delete: where and when the owner approved this deletion. It is recorded")
+    parser.add_argument("--expect-stopped", action="store_true",
+                        help="Claude only: the session has already stopped and only the record is wanted. "
+                             "Refuses, changing nothing, if the session is running")
     parser.add_argument("id", help="the id that spawn-peer printed")
     parser.add_argument("sender", help='who is retiring it, e.g. "claude/my-session"')
     args = parser.parse_args(argv)
     if args.delete and not args.approval.strip():
         parser.error("--delete needs --approval: permanent deletion requires the owner's approval")
+    if args.delete and args.expect_stopped:
+        parser.error("--expect-stopped records a retirement; it cannot be combined with --delete")
     if not args.sender.strip() or "\n" in args.sender:
         parser.error("sender must be a non-empty single line")
 
@@ -78,17 +101,23 @@ def main(argv):
     if kind not in ("codex", "claude"):
         print(f"retire-peer: the spawn record for {args.id} has no valid kind", file=sys.stderr)
         return EXIT_REFUSED
+    if args.expect_stopped and kind != "claude":
+        print("retire-peer: --expect-stopped applies to Claude sessions only; refusing", file=sys.stderr)
+        return EXIT_REFUSED
     action = ACTIONS[(kind, args.delete)]
     # Only the latest step counts: an agent retired and then resumed from the agent menu is live again.
+    # So is one brought back some other way, with `claude attach` or `codex unarchive`, which leaves no
+    # record: a session that is running again may be retired again.
     lifecycle = [e for e in events if e.get("event") in ("retired", "resumed")]
     latest = lifecycle[-1] if lifecycle else {}
-    if not args.delete and latest.get("event") == "retired" and latest.get("action") == action:
+    if (not args.delete and latest.get("event") == "retired" and latest.get("action") == action
+            and not running_again(kind, args.id)):
         print(f"retire-peer: {args.id} already had `{action}` applied", file=sys.stderr)
         return EXIT_REFUSED
 
     if args.dry_run:
         print(f"DRY RUN: would check the live session, then apply `{action}` to {kind} agent "
-              f"{origin.get('name')!r} ({args.id}). Nothing contacted, nothing changed.")
+              f"{origin.get('name')!r} ({args.id}). Nothing changed.")
         return 0
 
     already_stopped = False
@@ -108,11 +137,18 @@ def main(argv):
                                     capture_output=True, text=True, timeout=30)
             sessions = json.loads(listed.stdout or "[]") if listed.returncode == 0 else []
             live = [s for s in sessions if isinstance(s, dict) and s.get("id") == args.id]
-            if len(live) != 1:
-                raise Mismatch(f"expected exactly 1 live Claude session with id {args.id}, found {len(live)}")
-            check_same("claude", live[0], origin)
+            # The CLI can list one session twice, for example a finished run next to a running one. That
+            # is still one session. Two different sessions under one short id are refused.
+            distinct = {s.get("sessionId") if isinstance(s.get("sessionId"), str) else id(s) for s in live}
+            if len(distinct) != 1:
+                raise Mismatch(f"expected exactly 1 Claude session with id {args.id}, found {len(distinct)}")
+            for entry in live:
+                check_same("claude", entry, origin)
+            running = claude_running(args.id)
+            if args.expect_stopped and running:
+                raise Mismatch("the session is running again, and --expect-stopped asked for the record only")
             # A finished session is listed by --all only. There is nothing to stop, so only the record is written.
-            already_stopped = action == "stop" and not claude_running(args.id)
+            already_stopped = action == "stop" and not running
             if not already_stopped:
                 # Never pass --discard-unpushed or --force-remove-worktree: those are the owner's call.
                 done = subprocess.run([claude_bin(), action, args.id], capture_output=True, text=True, timeout=120)

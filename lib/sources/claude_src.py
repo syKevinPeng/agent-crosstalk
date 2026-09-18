@@ -48,7 +48,7 @@ def _listing(extra_args=(), timeout=1.5):
     return sessions
 
 
-def list_sessions(extra_ids=(), timeout=1.5, include_quit=False):
+def list_sessions(extra_ids=(), timeout=1.5, include_quit=False, errors=None):
     """One dict per live session, plus stopped ones in two cases, each marked `quit`.
 
     What counts as live is the CLI's own active list (`claude agents --json`). A session has stopped
@@ -62,14 +62,23 @@ def list_sessions(extra_ids=(), timeout=1.5, include_quit=False):
       (see FINISHED_EVERY), because the sidebar refreshes every two seconds.
 
     `state` is `unknown` when the CLI reports none, which is the case for sessions opened
-    directly in a terminal."""
+    directly in a terminal.
+
+    With an `errors` list, a failed lookup of stopped sessions adds a line there and the live
+    sessions stand, so the reader sees that rows may be missing. Without one it raises, which is
+    what an action wants before it touches a session."""
     live = [dict(s, quit=False) for s in _listing(timeout=timeout)]
     seen = {s["session_id"] for s in live}
     if include_quit:
-        stopped = _listing(("--all",), timeout=timeout)
+        try:
+            stopped = _listing(("--all",), timeout=timeout)
+        except SourceError:
+            if errors is None:
+                raise
+            stopped, _ = [], errors.append("claude: quit sessions unreadable")
     else:
         missing = frozenset(extra_ids) - {s["short_id"] for s in live}
-        stopped = [s for s in _finished_sessions(missing, timeout) if s["short_id"] in missing] if missing else []
+        stopped = [s for s in _finished_sessions(missing, timeout, errors) if s["short_id"] in missing] if missing else []
     sessions = list(live)
     for session in stopped:
         if session["session_id"] not in seen:          # a live listing of the same session always wins
@@ -78,12 +87,16 @@ def list_sessions(extra_ids=(), timeout=1.5, include_quit=False):
     return sessions
 
 
-def _finished_sessions(missing, timeout):
-    """`claude agents --json --all`, kept between refreshes (see FINISHED_EVERY)."""
+def _finished_sessions(missing, timeout, errors=None):
+    """`claude agents --json --all`, kept between refreshes (see FINISHED_EVERY). When a lookup
+    fails, the last one stands if it was made for the same spawned ids. Otherwise a spawned
+    session that finished may be missing, and `errors` says so."""
     now = time.monotonic()
     if missing != _finished["missing"] or now - _finished["at"] >= FINISHED_EVERY:
         try:
             _finished.update(missing=missing, at=now, sessions=_listing(("--all",), timeout=timeout))
         except SourceError:
-            pass               # the live listing stands: keep the last lookup and retry next refresh
+            usable = _finished["missing"] == missing and _finished["at"] > float("-inf")
+            if not usable and errors is not None:
+                errors.append("claude: finished sessions unreadable")
     return _finished["sessions"]

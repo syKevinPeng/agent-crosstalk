@@ -134,7 +134,7 @@ class TierTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         import agent_state
         self.home = os.path.expanduser("~")          # short_folder shortens the real home to ~
-        kid = agent_state.Agent(key="codex:k", kind="codex", name="pr2-review", session_id="k", access="ro",
+        kid = agent_state.Agent(key="codex:k", kind="codex", name="code-review", session_id="k", access="ro",
                                 cwd=os.path.join(self.home, "work", "project-one"), model="gpt-6-astra",
                                 open_messages=1, parent_key="claude:p")
         parent = agent_state.Agent(key="claude:p", kind="claude", name="lead session", session_id="p",

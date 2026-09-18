@@ -23,7 +23,7 @@ from codex_ws import CodexError, CodexWS  # noqa: E402
 
 from .base import SourceError, usage_folder  # noqa: E402
 
-# "Current week (Fable): 16% used · resets Sep 24, 1pm (America/New_York)"
+# "Current week (Fable): 16% used · resets Sep 24, 1pm (Europe/Berlin)"
 USAGE_LINE = re.compile(r"^Current (session|week)(?: \(([^)]{1,40})\))?: (\d{1,3})% used(?: . resets (.{1,60}))?$")
 RESET_ZONE = re.compile(r"^(.{1,40}?)\s*\(([A-Za-z_/+-]{1,40})\)\s*$")
 
@@ -60,7 +60,7 @@ def window_name(minutes):
 
 
 def parse_reset(text, now=None):
-    """'Sep 24, 1pm (America/New_York)' -> seconds from now, or None when it cannot be read."""
+    """'Sep 24, 1pm (Europe/Berlin)' -> seconds from now, or None when it cannot be read."""
     found = RESET_ZONE.match(text or "")
     if not found:
         return None

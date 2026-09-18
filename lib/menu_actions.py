@@ -186,8 +186,11 @@ def retire(agent):
         raise Refused("only a live agent that spawn-peer created can be retired from here")
     _attempt(agent, "retire")
     agent_id = agent.session_id if agent.kind == "codex" else agent.short_id
+    # A stopped session is offered a record-only Quit. If it came back since the popup read it,
+    # retire-peer refuses instead of stopping it behind a confirm that promised a record only.
+    expect = ["--expect-stopped"] if agent.quit else []
     try:
-        done = subprocess.run([os.path.join(ROOT, "bin", "retire-peer"), agent_id, "owner/agent-menu"],
+        done = subprocess.run([os.path.join(ROOT, "bin", "retire-peer"), *expect, agent_id, "owner/agent-menu"],
                               capture_output=True, text=True, timeout=150)
     except (OSError, subprocess.TimeoutExpired) as exc:
         _result(agent, "retire", "error", error=type(exc).__name__)
@@ -235,11 +238,11 @@ def quit_agent(agent):
     """Stop or archive an agent so it can be resumed later. Nothing is deleted."""
     if agent.quit and not menu_detail.can_quit(agent):
         raise Refused("that agent is already quit")
+    if agent.pane_id or agent.maybe_in_pane:
+        raise Refused("it runs or may run in a pane, so quit it there")
     if agent.spawned:
         retire(agent)                              # spawn-peer's own path, so the spawn record notes it
         return "quit. Resume brings it back"
-    if agent.pane_id:
-        raise Refused("it runs in a pane, so quit it there")
     if agent.kind == "codex":
         _check_codex(agent)
         _attempt(agent, "quit")
@@ -298,14 +301,15 @@ def resume(agent):
         except CodexError as exc:
             _result(agent, "resume", "error", error=str(exc)[:200])
             raise Refused(f"unarchive failed: {exc}") from None
+        note = _note_resumed(agent)          # it is live from here on, whether or not its window opens
         binary = os.environ.get("CODEX_BIN") or "codex"
         try:
             tmux_src.new_window(agent.name[:20], f"{shlex.quote(binary)} resume {agent.session_id}", cwd=agent.cwd)
         except SourceError as exc:
             _result(agent, "resume", "unarchived, window failed", error=str(exc))
-            raise Refused(f"unarchived, but its window could not open: {exc}") from None
+            raise Refused(f"unarchived, but its window could not open: {exc}{note}") from None
         _result(agent, "resume", "unarchived and opened")
-        return "resumed in a new window" + _note_resumed(agent)
+        return "resumed in a new window" + note
     if not SHORT_ID.fullmatch(agent.short_id or ""):
         raise Refused("this session has no usable id")
     try:

@@ -28,7 +28,7 @@ def can_quit(agent):
     thread cannot be told from a live one by `retire-peer`, so that one is resumed first."""
     if agent.quit:
         return agent.kind == "claude" and agent.spawned and not agent.retired
-    if agent.retired or agent.pane_id:
+    if agent.retired or agent.pane_id or agent.maybe_in_pane:
         return False                              # one running in a pane is quit there, not from here
     if agent.kind == "codex":
         return True
@@ -41,6 +41,8 @@ def quit_note(agent):
         return ""
     if agent.pane_id:
         return "it runs in a pane, so quit it there"
+    if agent.maybe_in_pane:
+        return "a pane may be showing it, so quit it there"
     return "an interactive session ends only when its own terminal is closed"
 
 

@@ -24,7 +24,7 @@ class CodexReplyTest(unittest.TestCase):
                               env=dict(os.environ, CODEX_APP_SERVER_SOCK=self.sock))
 
     def set_turns(self, turns):
-        self.daemon.threads[THREAD_ID] = {"id": THREAD_ID, "name": "comms-test", "cwd": "/w", "turns": turns}
+        self.daemon.threads[THREAD_ID] = {"id": THREAD_ID, "name": "peer-check", "cwd": "/w", "turns": turns}
 
     def test_prints_only_the_final_answer_of_the_latest_turn(self):
         self.set_turns([

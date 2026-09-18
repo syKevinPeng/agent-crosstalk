@@ -13,6 +13,10 @@ QUESTIONS = re.compile(r"\?\s+(\d+) questions?\b")
 # "N. No…", with an optional selection cursor in front.
 APPROVAL_YES = re.compile(r"^(?:[❯›>]\s*)?1\.\s+Yes\b")
 APPROVAL_NO = re.compile(r"^(?:[❯›>]\s*)?\d\.\s+No\b")
+# Any other choice menu: a numbered option under the selection cursor, or the footer Claude Code draws
+# under a question. Enter would pick the highlighted option there too.
+CHOICE_CURSOR = re.compile(r"^[❯›]\s*\d+\.\s+\S")
+CHOICE_FOOTER = re.compile(r"\bEnter to select\b")
 
 
 @dataclasses.dataclass
@@ -36,6 +40,7 @@ class Agent:
     spawned: bool = False         # created by spawn-peer
     access: str = ""              # ro | rw, spawned agents only
     pane_id: str = ""             # tmux %id, only when the match is certain
+    maybe_in_pane: bool = False   # some pane could be showing it, certain or not: no Quit from the menu
     pane_pid: int = 0
     retired: bool = False
     source_error: bool = False
@@ -72,6 +77,8 @@ def waits_on_owner(title, screen):
     if "Action Required" in (title or ""):
         return True
     lines = auth_readers.tail(screen)
+    if any(CHOICE_CURSOR.search(line) or CHOICE_FOOTER.search(line) for line in lines):
+        return True
     first = next((i for i, line in enumerate(lines) if APPROVAL_YES.search(line)), None)
     return first is not None and any(APPROVAL_NO.search(line) for line in lines[first + 1:])
 
@@ -119,6 +126,7 @@ def _match_panes(agents, panes):
             # Codex puts the thread name in its pane title and gives no process id to walk.
             fits = [pane for pane in panes if pane["command"] == agent.kind
                     and agent.name in title_names(agent.kind, pane["title"])]
+        agent.maybe_in_pane = bool(fits)
         if len(fits) == 1:
             claims.setdefault(fits[0]["pane_id"], []).append((agent, fits[0]))
     for claimants in claims.values():
@@ -152,7 +160,9 @@ def _link_parents(agents, spawned):
         if not child:
             continue
         child.spawned, child.access = True, record["access"]
-        child.retired = record["retired_at"] is not None
+        # A running agent is not retired, whatever the record says: it was brought back, by Resume
+        # whose record failed, or by hand with `claude attach` or `codex unarchive`.
+        child.retired = record["retired_at"] is not None and child.quit
         label = record["spawned_by"]
         parent = by_short.get(logs_src.label_short_id(label) or "")
         if not parent and "/" in label:
@@ -187,7 +197,8 @@ def collect(now=None, include_quit=False):
     recent = [s for s in spawned if s["retired_at"] is None or now - s["retired_at"] < RETIRED_VISIBLE]
     claude_ids = [s["id"] for s in recent if s["kind"] == "claude"]
     codex_ids = [s["id"] for s in recent if s["kind"] == "codex"]
-    for label, reader in (("claude", lambda: claude_src.list_sessions(extra_ids=claude_ids, include_quit=include_quit)),
+    for label, reader in (("claude", lambda: claude_src.list_sessions(extra_ids=claude_ids, include_quit=include_quit,
+                                                                    errors=errors)),
                           ("codex", lambda: codex_src.list_threads(extra_ids=codex_ids, include_quit=include_quit))):
         try:
             raw.extend(reader())

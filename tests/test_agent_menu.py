@@ -72,16 +72,16 @@ class AgentMenuTest(unittest.TestCase):
 
     def test_a_spawned_agent_hangs_under_its_parent_with_its_access(self):
         self.m.claude_session(CLAUDE_A, "lead session", 500, status="busy")
-        self.codex_thread(CODEX_C, "comms-test", status="active")
-        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "comms-test", "id": CODEX_C,
+        self.codex_thread(CODEX_C, "peer-check", status="active")
+        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "peer-check", "id": CODEX_C,
                                      "access": "read-only", "spawned_by": "claude/lead-session [aaaaaaaa]"})
         lines = self.tree()
         parent = next(i for i, l in enumerate(lines) if "lead session" in l)
         self.assertTrue(lines[parent].startswith(" ▾ lead session"), lines)
-        self.assertTrue(lines[parent + 1].startswith("   └ comms-test"), lines)
+        self.assertTrue(lines[parent + 1].startswith("   └ peer-check"), lines)
         self.assertTrue(lines[parent + 1].endswith("ro codex ⠋"), lines)
         text = self.detail(f"claude:{CLAUDE_A}").stdout
-        self.assertIn("CHILDREN   comms-test  ro  ⠋ working", text)
+        self.assertIn("CHILDREN   peer-check  ro  ⠋ working", text)
         self.assertIn("spawned by: lead session", self.detail(f"codex:{CODEX_C}").stdout)
 
     def test_a_just_spawned_thread_missing_from_the_listing_is_still_shown(self):
@@ -95,6 +95,7 @@ class AgentMenuTest(unittest.TestCase):
     def test_a_retired_child_drops_off_after_ten_minutes(self):
         for thread_id, name, minutes in ((CODEX_P, "just-done", 2), (CODEX_C, "long-done", 30)):
             self.codex_thread(thread_id, name, status="notLoaded")
+            self.daemon.archived.add(thread_id)                 # retire-peer archived it
             self.m.log("spawned.jsonl",
                        {"event": "spawned", "kind": "codex", "name": name, "id": thread_id, "access": "read-only",
                         "spawned_by": "claude/x"},
@@ -146,7 +147,8 @@ class AgentMenuTest(unittest.TestCase):
         self.codex_thread(CODEX_P, "twin")
         self.m.pane(1, 100, "codex", "twin | proj")
         self.m.pane(2, 200, "codex", "twin | proj")
-        self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send, Quit agent")     # queued, never typed into a guess
+        self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send")     # queued, never typed into a guess
+        self.assertIn("a pane may be showing it", self.detail(f"codex:{CODEX_P}").stdout)   # and not quit behind it
 
     def test_a_codex_thread_matches_its_name_segment_only_never_the_project(self):
         self.codex_thread(CODEX_P, "proj")            # named like the project folder of another agent's pane
@@ -169,8 +171,8 @@ class AgentMenuTest(unittest.TestCase):
                 self.codex_thread(CODEX_P, full, status="active")
                 self.codex_thread(CODEX_C, part, status="idle")
                 self.m.pane(1, 100, "codex", title)
-                self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send, Quit agent")
-                self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Send, Quit agent")
+                self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send")
+                self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Send")
                 del self.daemon.threads[CODEX_C]                 # alone, the full name does get its pane
                 self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Open pane, Send")
 
@@ -190,8 +192,8 @@ class AgentMenuTest(unittest.TestCase):
         self.m.pane(7, 700, "codex", "builder | proj")
         self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Open pane, Send")   # the live one keeps its pane
         self.daemon.threads[CODEX_C]["status"] = {"type": "idle"}                  # now two live agents fit one pane
-        self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send, Quit agent")
-        self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Send, Quit agent")
+        self.assertEqual(self.buttons(f"codex:{CODEX_P}"), "buttons: Send")
+        self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Send")
 
     def test_the_pane_must_run_the_agents_own_cli(self):
         self.codex_thread(CODEX_P, "builder")
@@ -463,6 +465,18 @@ class AgentMenuTest(unittest.TestCase):
         self.assertNotIn("thread/archive", self.daemon.methods())
         self.assertEqual(self.m.actions(), [])
 
+    def test_the_first_key_of_a_paste_presses_nothing(self):
+        """The burst rule judges a key by the one before it, so the first key of a paste looks typed.
+        Pasted into a quit thread's popup, "resume it tomorrow" starts with the Resume hotkey; the keys
+        behind it cancel it. The same key typed alone does resume."""
+        self.codex_thread(CODEX_C, "kid")
+        self.daemon.archived.add(CODEX_C)
+        self.popup_session(f"codex:{CODEX_C}", [(b"resume it tomorrow, not now", 1.5)], b"Resume")
+        self.assertEqual((self.daemon.params("thread/unarchive"), self.m.actions()), ([], []))
+        self.assertFalse(any(c.startswith("new-window") for c in self.m.tmux_calls()))
+        self.popup_session(f"codex:{CODEX_C}", [(b"r", 1.5)], b"Resume")
+        self.assertEqual(self.daemon.params("thread/unarchive"), [{"threadId": CODEX_C}])
+
     def test_a_confirm_with_keys_right_behind_it_is_cancelled(self):
         """A paste whose chunk boundary lands between `x` and `y...` looks like a person to the state
         machine. The popup then sees the keys still arriving behind the `y` and cancels. The same keys
@@ -540,19 +554,21 @@ class AgentMenuTest(unittest.TestCase):
 
     def test_a_retire_time_in_the_future_does_not_keep_a_row_forever(self):
         self.codex_thread(CODEX_C, "time-traveller", status="notLoaded")
+        self.daemon.archived.add(CODEX_C)              # retire-peer archived it
         self.m.log("spawned.jsonl",
                    {"event": "spawned", "kind": "codex", "name": "time-traveller", "id": CODEX_C,
                     "access": "read-only", "spawned_by": "claude/x"},
                    {"event": "retired", "id": CODEX_C, "action": "archive", "time_utc": "2999-01-01T00:00:00Z"})
         self.assertFalse(any("time-traveller" in l for l in self.tree()))
 
-    def test_a_retired_agent_offers_no_buttons(self):
+    def test_a_retired_agent_offers_resume_only(self):
         self.codex_thread(CODEX_C, "just-done", status="notLoaded")
+        self.daemon.archived.add(CODEX_C)              # retire-peer archived it
         self.m.log("spawned.jsonl",
                    {"event": "spawned", "kind": "codex", "name": "just-done", "id": CODEX_C, "access": "read-only",
                     "spawned_by": "claude/x"},
                    {"event": "retired", "id": CODEX_C, "action": "archive", "time_utc": stamp(1)})
-        self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons:")
+        self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Resume")
 
     def test_a_background_claude_with_no_pane_offers_attach_only(self):
         self.m.claude_session(CLAUDE_B, "far away", 900)
@@ -582,8 +598,8 @@ class AgentMenuTest(unittest.TestCase):
 
     def test_ascii_mode_uses_no_character_outside_ascii(self):
         self.m.claude_session(CLAUDE_A, "lead session with a long name", 500, status="busy")
-        self.codex_thread(CODEX_C, "comms-test", status="active")
-        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "comms-test", "id": CODEX_C,
+        self.codex_thread(CODEX_C, "peer-check", status="active")
+        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "peer-check", "id": CODEX_C,
                                      "access": "read-only", "spawned_by": "claude/lead-session-with-a-long-name"})
         self.m.log("messages.jsonl", {"channel": "codex queue", "thread_uuid": CODEX_C, "msg_id": "m1",
                                       "result": "queued", "first_line": "x"})
@@ -636,7 +652,7 @@ class AgentMenuTest(unittest.TestCase):
             self.assertNotIn("Traceback", proc.stderr)
 
     def test_look_only_mode_offers_no_typing_and_no_quit(self):
-        self.codex_thread(CODEX_C, "comms-test", status="active")
+        self.codex_thread(CODEX_C, "peer-check", status="active")
         self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Send, Quit agent")
         self.m.env["AGENT_MENU_LOOK_ONLY"] = "1"
         text = self.detail(f"codex:{CODEX_C}").stdout
