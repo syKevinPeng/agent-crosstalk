@@ -54,6 +54,8 @@ class FakeCodexDaemon:
         self.list_other_ids = False  # when True, the queue lists an id other than the one `queue/add` gave
         self.list_shape = "data"     # the key the queue listing uses; anything else plays a changed daemon
         self.vanish = False          # when True, a queued message disappears without any turn taking it
+        self.quick_turns = False     # when True, a turn ends at once, before anyone can see it running
+        self.turns = {}              # thread id -> turns a queued message started, oldest first
         self._queued = 0
         self.threads = {f"old-{i}": {"id": f"old-{i}", "name": n, "cwd": "/x"}
                         for i, n in enumerate(existing_names)}
@@ -82,8 +84,12 @@ class FakeCodexDaemon:
 
     def _drain(self, tid):
         if not self.stall and self.status.get(tid) == "idle" and self.queue.get(tid):
-            self.taken += [item["id"] for item in self.queue.pop(tid)]
-            self.status[tid] = "active"
+            items = self.queue.pop(tid)
+            self.taken += [item["id"] for item in items]
+            self.turns.setdefault(tid, []).append({"status": "completed" if self.quick_turns else "inProgress", "items": [
+                {"type": "userMessage", "clientId": item["clientUserMessageId"], "content": item["input"]}
+                for item in items]})
+            self.status[tid] = "idle" if self.quick_turns else "active"
 
     def queued_ids(self):
         return {tid: [item["id"] for item in items] for tid, items in self.queue.items() if items}
@@ -106,6 +112,9 @@ class FakeCodexDaemon:
             if self.list_other_ids:
                 items = [dict(i, id="other-" + i["id"], clientUserMessageId="other") for i in items]
             return {self.list_shape: items, "nextCursor": None}
+        if method == "thread/turns/list":
+            turns = list(reversed(self.turns.get(params["threadId"], [])))  # newest first, like the daemon
+            return {"data": turns[:params.get("limit") or None], "nextCursor": None}
         if method == "thread/resume":
             tid = params["threadId"]
             if self.status.get(tid, "notLoaded") == "notLoaded":

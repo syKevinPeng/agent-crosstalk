@@ -150,10 +150,11 @@ def instruct(agent, text):
         _attempt(agent, "instruct", instruction=text)
         # `codex queue` only stores the text. The daemon runs it only on a loaded thread, so an agent
         # it unloaded is woken first, the same way and with the same limits as bin/send-to-codex.
+        wake_error = None
         try:
             woke = codex_delivery.prepare(agent.session_id)["woke"]
-        except Exception:  # noqa: BLE001 -- the wake is a help, never a reason not to send
-            woke = False
+        except Exception as exc:  # noqa: BLE001 -- the wake is a help, never a reason not to send
+            woke, wake_error = False, f"{type(exc).__name__}: {exc}"[:200]
         binary = os.environ.get("CODEX_BIN") or "codex"
         try:
             done = subprocess.run([binary, "queue", "--thread", agent.session_id, "--message", text],
@@ -172,8 +173,13 @@ def instruct(agent, text):
                                                  marker=text)
             except Exception as exc:  # noqa: BLE001 -- the text is queued: report that, or it gets sent twice
                 outcome = {"delivery": "unknown", "woke": woke, "note": f"{type(exc).__name__}: {exc}"[:200]}
+        if wake_error:
+            outcome["wake_error"] = wake_error
         _result(agent, "instruct", "queued", **outcome)
-        return DELIVERY_NOTES[outcome["delivery"]].format(note=outcome.get("note") or "no reason given")
+        note = DELIVERY_NOTES[outcome["delivery"]].format(note=outcome.get("note") or "no reason given")
+        if wake_error and outcome["delivery"] not in codex_delivery.DELIVERED:
+            note += f". The wake before it failed: {wake_error}"
+        return note
     raise Refused("a Claude session with no pane takes input only in its own terminal. Use Attach")
 
 

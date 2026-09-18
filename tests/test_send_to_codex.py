@@ -273,6 +273,21 @@ class DeliveryTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 5, proc.stderr)
         self.assertEqual(read_log(self.tmp)[0]["delivery"], "unknown")
 
+    def test_a_turn_that_ends_before_the_first_look_still_counts(self):
+        # A turn that fails at once (a usage limit, an expired login) is over before the first poll.
+        self.daemon.status[THREAD] = "idle"
+        self.daemon.quick_turns = True
+        proc = self.send()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(read_log(self.tmp)[0]["delivery"], "started")
+
+    def test_a_wake_is_refused_when_it_cannot_be_checked_that_the_thread_is_not_archived(self):
+        self.record(self.spawned())
+        self.daemon.status[THREAD] = "notLoaded"
+        self.daemon.fail.add("thread/queue/list")
+        self.assertEqual(self.send().returncode, 5)
+        self.assertNotIn("thread/resume", self.daemon.methods())
+
     def test_an_archived_agent_is_never_woken_even_without_a_retired_line(self):
         # `codex archive` by hand, or a retire-peer whose record line failed, leaves no `retired` line.
         self.record(self.spawned())
@@ -281,7 +296,7 @@ class DeliveryTest(unittest.TestCase):
         proc = self.send()
         self.assertNotEqual(proc.returncode, 0)          # codex queue itself refuses an archived thread
         self.assertNotIn("thread/resume", self.daemon.methods())
-        self.assertIn("archived", read_log(self.tmp)[0]["delivery_note"])
+        self.assertEqual(read_log(self.tmp)[0]["delivery_note"], "it is archived. Resume it first")
 
     def test_the_latest_spawn_record_decides_the_settings(self):
         self.record(dict(self.spawned(access="write", approvals="never"), approval="owner"), self.spawned())

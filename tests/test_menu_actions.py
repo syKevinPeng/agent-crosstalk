@@ -217,6 +217,15 @@ class MenuActionsTest(unittest.TestCase):
         self.assertTrue(note.startswith("queued, but"), note)
         self.assertEqual(len(daemon.params("thread/queue/add")), 1)
 
+    def test_a_wake_that_failed_is_said_and_logged_not_swallowed(self):
+        daemon, agent = self.headless_codex("notLoaded", spawned=True)
+        with mock.patch.object(menu_actions.codex_delivery, "prepare", side_effect=RuntimeError("boom")), \
+                mock.patch.object(menu_actions.codex_delivery, "wake", return_value=(False, "no wake")):
+            note, ok, _ = menu_actions.perform(agent, "Send", "Please retry the push")
+        self.assertTrue(ok, note)
+        self.assertIn("RuntimeError: boom", note)
+        self.assertEqual(self.m.actions()[-1]["wake_error"], "RuntimeError: boom")
+
     def test_a_torn_spawn_record_neither_crashes_the_popup_nor_blocks_the_send(self):
         daemon, agent = self.headless_codex("notLoaded", spawned=False)
         with open(self.m.dir / "spawned.jsonl", "wb") as fh:

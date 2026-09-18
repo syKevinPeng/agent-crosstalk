@@ -60,13 +60,14 @@ def queue_items(ws, thread_id):
     return items
 
 
-def archived(ws, thread_id):
-    """The daemon keeps no queue for an archived thread and says so, which is how archiving is seen here:
-    the spawn record misses an archive done by hand or one whose record line could not be written."""
-    try:
-        queue_items(ws, thread_id)
-    except CodexError as exc:
-        return "is archived" in str(exc)
+def turn_took(ws, thread_id, queued_id, marker):
+    """Does one of the thread's latest turns hold our message? A turn can end before anyone sees it
+    running, as one that fails at once on a usage limit or an expired login does."""
+    for turn in ws.rpc("thread/turns/list", {"threadId": thread_id, "limit": 3, "sortDirection": "desc"}).get("data") or []:
+        for item in (turn.get("items") or []) if isinstance(turn, dict) else []:
+            if isinstance(item, dict) and item.get("type") == "userMessage" and is_ours(
+                    {"id": item.get("clientId"), "input": item.get("content")}, queued_id, marker):
+                return True
     return False
 
 
@@ -91,10 +92,16 @@ def wake_params(thread_id):
 def wake(ws, thread_id):
     """Load an unloaded agent that spawn-peer created, with its recorded settings. Returns (woke, why not)."""
     params, why = wake_params(thread_id)
-    if params and archived(ws, thread_id):
-        params, why = None, "it is archived. Resume it first"
     if not params:
         return False, why
+    # The spawn record misses an archive done by hand, or one whose record line failed. The daemon
+    # refuses to list an archived thread's queue and says so. No answer at all is no wake either.
+    try:
+        queue_items(ws, thread_id)
+    except CodexError as exc:
+        if "is archived" in str(exc):
+            return False, "it is archived. Resume it first"
+        return False, f"it could not be checked that it is not archived ({exc})"[:300]
     ws.rpc("thread/resume", params)
     return True, None
 
@@ -131,8 +138,8 @@ def is_ours(item, queued_id, marker):
 def confirm(thread_id, queued_id, woke=False, wait=DEFAULT_WAIT, marker=None):
     """After `codex queue`: {delivery, woke, note}. `marker` is text only our message holds.
     `delivery` is one of
-    started     the message left the queue and a turn is running: both, because a message can also
-                leave the queue without any turn taking it
+    started     the message left the queue, and one of the latest turns holds it or a turn is running.
+                Leaving the queue alone is not enough: a message can leave it with no turn taking it
     waiting     the thread is running a turn, and takes the message when that turn ends
     not-loaded  nothing will run it until the thread is opened
     stuck       the thread is loaded and idle, and the message was still queued after `wait` seconds
@@ -145,7 +152,12 @@ def confirm(thread_id, queued_id, woke=False, wait=DEFAULT_WAIT, marker=None):
             queued = any(is_ours(item, queued_id, marker) for item in queue_items(ws, thread_id))
             status = status_type(read_thread(ws, thread_id))
             if status == "active":
+                # A running turn with our message gone is taken as the turn that took it. Checking that
+                # the turn holds it would be stronger, but no mechanism is known that removes a message
+                # without a turn, and a turn may list its message late.
                 return {"delivery": "waiting" if queued else "started", "woke": woke, "note": None}
+            if not queued and turn_took(ws, thread_id, queued_id, marker):
+                return {"delivery": "started", "woke": woke, "note": None}
             if queued and status == "notLoaded":
                 # The daemon can unload the thread between prepare() and the queue.
                 done, why = (False, "it was woken, and unloaded again") if woke else wake(ws, thread_id)
