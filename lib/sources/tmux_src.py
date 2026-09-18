@@ -97,6 +97,61 @@ def focus(pane_id):
     _tmux("select-pane", "-t", pane_id)
 
 
+def option(target, name, scope="p", inherited=False):
+    """The value a pane (scope p) or window (scope w) sets itself for option `name`, "" when it sets
+    none. With `inherited`, the value in effect there, wherever it is set."""
+    return _tmux("show-options", f"-{scope}", "-q", "-v", *(["-A"] if inherited else []),
+                 "-t", target, name).rstrip("\n")
+
+
+def set_option(target, name, value=None, scope="p"):
+    """Set an option on a pane or window itself, or with `value` None remove it there."""
+    if value is None:
+        _tmux("set-option", f"-{scope}", "-u", "-t", target, name)
+    else:
+        _tmux("set-option", f"-{scope}", "-t", target, name, value)
+
+
+def set_options(changes):
+    """Several set_option changes, (target, name, value or None, scope), in one tmux call, so tmux
+    redraws once rather than once per change. tmux runs them in order and stops at a failing one."""
+    argv = []
+    for target, name, value, scope in changes:
+        argv += [";"] if argv else []
+        if value is None:
+            argv += ["set-option", f"-{scope}", "-u", "-t", target, name]
+        else:
+            # An argument ending in ";" would end the command there. No value written here ends so,
+            # but a value saved from the owner could.
+            argv += ["set-option", f"-{scope}", "-t", target, name, value[:-1] + "\\;" if value.endswith(";") else value]
+    if argv:
+        _tmux(*argv)
+
+
+def window_of(pane_id):
+    return _tmux("display-message", "-p", "-t", pane_id, "#{window_id}").strip()
+
+
+def panes_with_option(name, window=None):
+    """The ids of the panes, in one window or in all, that set the user option `name` themselves."""
+    where = ["-t", window] if window else ["-a"]
+    found = []
+    for line in _tmux("list-panes", *where, "-F", f"#{{pane_id}}\t#{{{name}}}").splitlines():
+        pane, _, value = line.partition("\t")
+        if pane.startswith("%") and value and pane not in found:
+            found.append(pane)
+    return found
+
+
+def windows_with_option(name):
+    found = []
+    for line in _tmux("list-windows", "-a", "-F", f"#{{window_id}}\t#{{{name}}}").splitlines():
+        window, _, value = line.partition("\t")
+        if window.startswith("@") and value and window not in found:
+            found.append(window)
+    return found
+
+
 def popup(command, width=100, height=26, title=""):
     """tmux draws the border and the title, so the program inside draws none of its own."""
     try:

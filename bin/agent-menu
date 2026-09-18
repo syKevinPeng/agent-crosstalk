@@ -7,6 +7,7 @@ import curses
 import locale
 import os
 import shlex
+import signal
 import sys
 import threading
 import time
@@ -15,6 +16,7 @@ BIN = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(BIN), "lib"))
 import agent_state  # noqa: E402
 import menu_curses  # noqa: E402
+import menu_highlight  # noqa: E402
 import menu_render  # noqa: E402
 import menu_style  # noqa: E402
 from sources import limits_src, tmux_src  # noqa: E402
@@ -96,6 +98,21 @@ def show_help(screen):
 
 
 def run(screen):
+    """The sidebar. The selected agent's pane stays highlighted until the sidebar ends, however it ends:
+    a highlight a killed sidebar left behind is undone when the next one starts."""
+    menu_highlight.clear_stale()
+    highlighter = menu_highlight.Highlighter()
+    try:
+        _run(screen, highlighter)
+    finally:
+        highlighter.clear()
+
+
+def _end_on_signal(signum, _frame):
+    raise SystemExit(128 + signum)  # so curses and the highlight are undone as on q
+
+
+def _run(screen, highlighter):
     menu_curses.cursor(False)
     colour = menu_curses.setup(screen)
     glyphs = menu_style.glyphs()
@@ -120,6 +137,8 @@ def run(screen):
             menu_curses.put(screen, 0, 0, " AGENTS  loading", curses.A_BOLD)
         else:
             selected, collapsed = menu_render.move(snapshot, collapsed, selected, "stay")
+            chosen_agent = snapshot.by_key.get(selected)
+            highlighter.show(chosen_agent.pane_id if chosen_agent else None)  # no tmux call unless it changed
             rendered = menu_render.rows(snapshot, columns, collapsed, glyphs, frame // 2)
             pinned = rendered[:menu_render.pinned_count(rendered)]
             block = menu_render.limit_rows(limits.limits, columns, glyphs, limits.taken_at,
@@ -226,6 +245,8 @@ def main(argv):
         print("agent-menu: this needs a real terminal (TERM is dumb or output is not a terminal). --once prints the tree as text.",
               file=sys.stderr)
         return 2
+    for hangup in (signal.SIGTERM, signal.SIGHUP):  # tmux sends SIGHUP when the pane is killed
+        signal.signal(hangup, _end_on_signal)
     curses.wrapper(run)
     return 0
 
