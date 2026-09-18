@@ -10,29 +10,12 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_peers import FakeCodexDaemon  # noqa: E402
+from test_peers import QUEUEING_STUB, FakeCodexDaemon  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = Path(os.environ.get("AGENT_COMMS_BIN") or ROOT / "bin") / "send-to-codex"
-LIB = Path(os.environ.get("AGENT_COMMS_LIB") or ROOT / "lib")
 THREAD = "0b0b0b0b-0000-7000-8000-000000000001"
 
-# Plays `codex queue` the way the real one works: it adds the message to the daemon's queue for
-# the thread, and a turn starts only if the daemon has that thread loaded and idle.
-QUEUEING_STUB = f"""#!/usr/bin/env bash
-printf '%s\\n' "$@" > "$STUB_DIR/argv.txt"
-exec python3 - "$@" <<'PY'
-import sys
-sys.path.insert(0, {str(LIB)!r})
-from codex_ws import CodexWS
-a = sys.argv[1:]
-thread = a[a.index("--thread") + 1]
-ws = CodexWS(experimental=True)
-item = ws.rpc("thread/queue/add", {{"threadId": thread, "input": [{{"type": "text", "text": a[a.index("--message") + 1]}}]}})["id"]
-ws.close()
-print(f"Queued message {{item}} for thread {{thread}}.")
-PY
-"""
 
 
 def make_stub(tmp, exit_code, output):
@@ -76,8 +59,14 @@ class SendToCodexTest(unittest.TestCase):
         self.daemon.threads[THREAD] = {"id": THREAD, "name": "peer", "cwd": "/w"}
         self.daemon.status[THREAD] = "idle"
 
+    def queueing_stub(self):
+        stub = Path(self.tmp) / "codex-stub"
+        stub.write_text(QUEUEING_STUB)
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+        return stub, Path(self.tmp) / "argv.txt"
+
     def test_success_queues_and_logs_one_line(self):
-        stub, argv_file = make_stub(self.tmp, 0, f"Queued message q-123 for thread {THREAD}.")
+        stub, argv_file = self.queueing_stub()
         proc = run_tool(self.tmp, stub, THREAD, "claude/test", "Summary line\nbody")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         argv = argv_file.read_text()
@@ -86,7 +75,8 @@ class SendToCodexTest(unittest.TestCase):
         (line,) = read_log(self.tmp)
         self.assertEqual(line["channel"], "codex queue")
         self.assertEqual(line["result"], "queued")
-        self.assertEqual(line["queued_id"], "q-123")
+        self.assertEqual(line["queued_id"], "q-1")
+        self.assertEqual(line["delivery"], "started")
         self.assertEqual(line["thread_uuid"], THREAD)
         self.assertEqual(line["first_line"], "Summary line")
         self.assertEqual(line["exit_code"], 0)
@@ -111,7 +101,7 @@ class SendToCodexTest(unittest.TestCase):
         self.assertEqual(self.daemon.calls, [])  # nor does it ask the daemon anything
 
     def test_message_from_stdin(self):
-        stub, argv_file = make_stub(self.tmp, 0, f"Queued message q-9 for thread {THREAD}.")
+        stub, argv_file = self.queueing_stub()
         proc = run_tool(self.tmp, stub, THREAD, "claude/test", "-", stdin="From stdin\nmore")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("From stdin", argv_file.read_text())
@@ -127,7 +117,7 @@ class SendToCodexTest(unittest.TestCase):
         self.assertEqual(read_log(self.tmp), [])
 
     def test_msg_id_is_stamped_in_message_and_log(self):
-        stub, argv_file = make_stub(self.tmp, 0, f"Queued message q-1 for thread {THREAD}.")
+        stub, argv_file = self.queueing_stub()
         proc = run_tool(self.tmp, stub, THREAD, "claude/test", "Summary line")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         (line,) = read_log(self.tmp)
@@ -266,6 +256,48 @@ class DeliveryTest(unittest.TestCase):
         proc = self.send()
         self.assertEqual(proc.returncode, 5, proc.stderr)
         self.assertEqual(read_log(self.tmp)[0]["delivery"], "not-loaded")
+
+    def test_a_listing_in_another_shape_is_unknown_never_started(self):
+        # thread/queue/list is experimental. If its answer changes shape, "not in the list" means nothing.
+        self.daemon.status[THREAD] = "idle"
+        self.daemon.stall = True
+        self.daemon.list_shape = "items"
+        proc = self.send()
+        self.assertEqual(proc.returncode, 5, proc.stderr)
+        self.assertEqual(read_log(self.tmp)[0]["delivery"], "unknown")
+
+    def test_a_message_gone_from_the_queue_with_no_turn_running_is_not_started(self):
+        self.daemon.status[THREAD] = "idle"
+        self.daemon.vanish = True
+        proc = self.send()
+        self.assertEqual(proc.returncode, 5, proc.stderr)
+        self.assertEqual(read_log(self.tmp)[0]["delivery"], "unknown")
+
+    def test_an_archived_agent_is_never_woken_even_without_a_retired_line(self):
+        # `codex archive` by hand, or a retire-peer whose record line failed, leaves no `retired` line.
+        self.record(self.spawned())
+        self.daemon.status[THREAD] = "notLoaded"
+        self.daemon.archived.add(THREAD)
+        proc = self.send()
+        self.assertNotEqual(proc.returncode, 0)          # codex queue itself refuses an archived thread
+        self.assertNotIn("thread/resume", self.daemon.methods())
+        self.assertIn("archived", read_log(self.tmp)[0]["delivery_note"])
+
+    def test_the_latest_spawn_record_decides_the_settings(self):
+        self.record(dict(self.spawned(access="write", approvals="never"), approval="owner"), self.spawned())
+        self.daemon.status[THREAD] = "notLoaded"
+        self.assertEqual(self.send().returncode, 0)
+        (params,) = self.daemon.params("thread/resume")
+        self.assertEqual((params["sandbox"], params["approvalPolicy"]), ("read-only", "on-request"))
+
+    def test_a_torn_spawn_record_line_does_not_stop_the_wake(self):
+        with open(Path(self.tmp) / "spawned.jsonl", "wb") as fh:
+            fh.write(b'{"event": "spawned", "name": "caf\xc3')         # cut inside a multibyte character
+            fh.write(b"\n" + json.dumps(self.spawned()).encode() + b"\n")
+        self.daemon.status[THREAD] = "notLoaded"
+        proc = self.send()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.daemon.taken, ["q-1"])
 
     def test_no_daemon_means_unconfirmed_never_success(self):
         stub, _ = make_stub(self.tmp, 0, f"Queued message q-7 for thread {THREAD}.")

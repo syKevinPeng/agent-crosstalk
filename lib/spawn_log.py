@@ -43,7 +43,8 @@ def append(record):
 
 def events_for(agent_id):
     try:
-        with open(path(), encoding="utf-8") as fh:
+        # A line torn inside a multibyte character must not hide every other line.
+        with open(path(), encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()
     except FileNotFoundError:
         return []

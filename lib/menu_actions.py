@@ -152,7 +152,7 @@ def instruct(agent, text):
         # it unloaded is woken first, the same way and with the same limits as bin/send-to-codex.
         try:
             woke = codex_delivery.prepare(agent.session_id)["woke"]
-        except CodexError:
+        except Exception:  # noqa: BLE001 -- the wake is a help, never a reason not to send
             woke = False
         binary = os.environ.get("CODEX_BIN") or "codex"
         try:
@@ -170,8 +170,8 @@ def instruct(agent, text):
             try:
                 outcome = codex_delivery.confirm(found.group(2), found.group(1), woke=woke, wait=DELIVERY_WAIT,
                                                  marker=text)
-            except CodexError as exc:
-                outcome = {"delivery": "unknown", "woke": woke, "note": str(exc)}
+            except Exception as exc:  # noqa: BLE001 -- the text is queued: report that, or it gets sent twice
+                outcome = {"delivery": "unknown", "woke": woke, "note": f"{type(exc).__name__}: {exc}"[:200]}
         _result(agent, "instruct", "queued", **outcome)
         return DELIVERY_NOTES[outcome["delivery"]].format(note=outcome.get("note") or "no reason given")
     raise Refused("a Claude session with no pane takes input only in its own terminal. Use Attach")

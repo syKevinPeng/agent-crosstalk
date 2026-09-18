@@ -82,6 +82,13 @@ class CodexReplyTest(unittest.TestCase):
         self.assertEqual((proc.returncode, proc.stderr), (0, ""))
         self.assertIn("archived", proc.stdout)
 
+    def test_a_queue_answer_in_another_shape_is_reported_not_trusted(self):
+        self.set_turns([{"status": "completed", "items": [{"type": "agentMessage", "text": "hi"}]}])
+        self.daemon.list_shape = "items"
+        proc = self.run_tool(THREAD_ID)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("could not read", proc.stderr)
+
     def test_no_turn_yet_exits_3(self):
         self.set_turns([])
         self.assertEqual(self.run_tool(THREAD_ID).returncode, 3)

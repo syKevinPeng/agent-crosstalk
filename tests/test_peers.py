@@ -18,8 +18,26 @@ ROOT = Path(__file__).resolve().parents[1]
 BIN = Path(os.environ.get("AGENT_COMMS_BIN") or ROOT / "bin")
 SPAWN = BIN / "spawn-peer"
 RETIRE = BIN / "retire-peer"
+LIB = Path(os.environ.get("AGENT_COMMS_LIB") or ROOT / "lib")
 THREAD_ID = "0c0c0c0c-0000-7000-8000-00000000abcd"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+# Plays `codex queue` the way the real one works: it adds the message to the daemon's queue for
+# the thread, and a turn starts only if the daemon has that thread loaded and idle.
+QUEUEING_STUB = f"""#!/usr/bin/env bash
+printf '%s\\n' "$@" > "$STUB_DIR/argv.txt"
+exec python3 - "$@" <<'PY'
+import sys
+sys.path.insert(0, {str(LIB)!r})
+from codex_ws import CodexWS
+a = sys.argv[1:]
+thread = a[a.index("--thread") + 1]
+ws = CodexWS(experimental=True)
+item = ws.rpc("thread/queue/add", {{"threadId": thread, "input": [{{"type": "text", "text": a[a.index("--message") + 1]}}]}})["id"]
+ws.close()
+print(f"Queued message {{item}} for thread {{thread}}.")
+PY
+"""
 
 
 class FakeCodexDaemon:
@@ -34,6 +52,8 @@ class FakeCodexDaemon:
         self.status, self.queue, self.taken = {}, {}, []
         self.stall = False  # when True, even an idle loaded thread leaves its queue alone
         self.list_other_ids = False  # when True, the queue lists an id other than the one `queue/add` gave
+        self.list_shape = "data"     # the key the queue listing uses; anything else plays a changed daemon
+        self.vanish = False          # when True, a queued message disappears without any turn taking it
         self._queued = 0
         self.threads = {f"old-{i}": {"id": f"old-{i}", "name": n, "cwd": "/x"}
                         for i, n in enumerate(existing_names)}
@@ -77,14 +97,15 @@ class FakeCodexDaemon:
             self._queued += 1
             item = {"id": f"q-{self._queued}", "clientUserMessageId": f"c-{self._queued}",
                     "input": params.get("input") or []}
-            self.queue.setdefault(params["threadId"], []).append(item)
-            self._drain(params["threadId"])
+            if not self.vanish:
+                self.queue.setdefault(params["threadId"], []).append(item)
+                self._drain(params["threadId"])
             return {"id": item["id"]}
         if method == "thread/queue/list":
             items = self.queue.get(params["threadId"], [])
             if self.list_other_ids:
                 items = [dict(i, id="other-" + i["id"], clientUserMessageId="other") for i in items]
-            return {"data": items, "nextCursor": None}
+            return {self.list_shape: items, "nextCursor": None}
         if method == "thread/resume":
             tid = params["threadId"]
             if self.status.get(tid, "notLoaded") == "notLoaded":
@@ -106,6 +127,7 @@ class FakeCodexDaemon:
             self.archived.discard(params["threadId"])
         if method == "thread/start":
             self.threads[THREAD_ID] = {"id": THREAD_ID, "name": None, "cwd": params.get("cwd")}
+            self.status[THREAD_ID] = "idle"  # a new thread is loaded, like on the real daemon
             return {"thread": self.threads[THREAD_ID]}
         if method == "thread/name/set":
             self.threads[params["threadId"]]["name"] = params["name"]
@@ -200,8 +222,7 @@ class PeersTest(unittest.TestCase):
         stub.write_text(CLAUDE_STUB)
         stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
         codex_stub = self.tmp / "codex-stub"
-        codex_stub.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$STUB_DIR/codex-argv.txt\"\n"
-                              f"echo 'Queued message q-1 for thread {THREAD_ID}.'\n")
+        codex_stub.write_text(QUEUEING_STUB.replace("argv.txt", "codex-argv.txt"))
         codex_stub.chmod(codex_stub.stat().st_mode | stat.S_IXUSR)
         self.env = dict(os.environ, HOME=str(self.home), CODEX_APP_SERVER_SOCK=self.sock, CLAUDE_BIN=str(stub),
                         CODEX_BIN=str(codex_stub), STUB_DIR=str(self.tmp),

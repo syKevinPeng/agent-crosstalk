@@ -143,19 +143,19 @@ printf '%s\n' "$msg" | bin/send-to-codex <thread> <sender> -  # message from std
 
 So `send-to-codex` does three things around `codex queue`:
 
-1. **Before:** it asks the daemon whether the thread is loaded. If it is not, and `spawn-peer` created it, and it is not retired, it loads it again with `thread/resume`, passing the folder, sandbox and approvals from the spawn record. A wake never widens what the owner chose at spawn time. Any other thread is never woken, because its settings are unknown and a wake with the daemon's defaults could widen them.
+1. **Before:** it asks the daemon whether the thread is loaded. If it is not, and `spawn-peer` created it, and it is neither retired in the spawn record nor archived according to the daemon, it loads it again with `thread/resume`, passing the folder, sandbox and approvals from the spawn record. A wake never widens what the owner chose at spawn time. Any other thread is never woken, because its settings are unknown and a wake with the daemon's defaults could widen them.
 2. **The send itself**, as before.
-3. **After:** it watches the daemon's queue until a turn takes the message. It finds the message by the id `codex queue` printed or by its `Msg-ID` line, because Codex does not document that the two ids match. If the daemon unloaded the thread in between, a spawned agent is woken then.
+3. **After:** it watches the daemon's queue until a turn takes the message. It finds the message by the id `codex queue` printed or by its `Msg-ID` line, because Codex does not document that the two ids match. A message counts as taken only when it has left the queue and the thread is running a turn: a message can leave the queue without any turn taking it. A queue listing in an unexpected shape is an error, never an empty queue. If the daemon unloaded the thread in between, a spawned agent is woken then.
 
 `delivery` in the log line and the tool's last line say what happened:
 
 | `delivery` | Meaning | Exit |
 | --- | --- | --- |
-| `started` | A turn took the message | 0 |
+| `started` | The message left the queue and the agent is running a turn | 0 |
 | `waiting` | The agent is running a turn and takes the message when that turn ends | 0 |
 | `not-loaded` | The thread is not loaded and was not woken, so it waits until someone opens it (`codex resume <id>`). `delivery_note` says why it was not woken | 5 |
 | `stuck` | The thread is loaded and idle, and the message was still queued when the wait ran out | 5 |
-| `unknown` | The daemon could not be asked | 5 |
+| `unknown` | The daemon could not be asked, its answer had an unexpected shape, or the message left the queue but no running turn was seen | 5 |
 
 Before you wait on a Codex agent, trust `delivery` and `codex-reply`, not the age of its session file.
 

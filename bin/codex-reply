@@ -8,6 +8,7 @@ import sys
 
 BIN = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(BIN), "lib"))
+import codex_delivery  # noqa: E402
 from codex_ws import CodexError, CodexWS  # noqa: E402
 
 EXIT_USAGE, EXIT_NOT_FOUND, EXIT_FAILED, EXIT_NOT_DONE, EXIT_QUEUED = 2, 3, 4, 5, 6
@@ -37,7 +38,7 @@ def main(argv):
             thread = ws.rpc("thread/read", {"threadId": args.thread, "includeTurns": True}).get("thread")
             # A queued message no turn has taken looks exactly like a slow agent, so look for one.
             try:
-                queued = ws.rpc("thread/queue/list", {"threadId": args.thread}).get("data", [])
+                queued = codex_delivery.queue_items(ws, args.thread)
             except CodexError as exc:
                 # The daemon keeps no queue for an archived thread, and such a thread takes no messages.
                 archived = "is archived" in str(exc)

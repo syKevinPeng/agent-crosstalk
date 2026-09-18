@@ -50,10 +50,31 @@ def resolve(ws, thread):
     return read_thread(ws, named[0]["id"]) if len(named) == 1 else None
 
 
+def queue_items(ws, thread_id):
+    """The thread's queued messages. An answer in any other shape is an error, never an empty queue:
+    `thread/queue/list` is experimental, and reading a changed answer as "nothing queued" would report
+    every waiting message as taken. `ws` must have been opened with experimental=True."""
+    items = ws.rpc("thread/queue/list", {"threadId": thread_id}).get("data")
+    if not isinstance(items, list):
+        raise CodexError("thread/queue/list: the answer has no list of queued messages")
+    return items
+
+
+def archived(ws, thread_id):
+    """The daemon keeps no queue for an archived thread and says so, which is how archiving is seen here:
+    the spawn record misses an archive done by hand or one whose record line could not be written."""
+    try:
+        queue_items(ws, thread_id)
+    except CodexError as exc:
+        return "is archived" in str(exc)
+    return False
+
+
 def wake_params(thread_id):
     """(thread/resume params, None) for a live Codex agent that spawn-peer created, else (None, why not)."""
     events = spawn_log.events_for(thread_id)
-    origin = next((e for e in events if e.get("event") == "spawned" and e.get("kind") == "codex"), None)
+    # The latest record counts, as in retire-peer.
+    origin = next((e for e in reversed(events) if e.get("event") == "spawned" and e.get("kind") == "codex"), None)
     if origin is None:
         return None, "spawn-peer did not create it, so its sandbox and approvals are unknown"
     # Only the latest step counts, as in retire-peer: an agent resumed from the menu is live again.
@@ -67,10 +88,21 @@ def wake_params(thread_id):
     return {"threadId": thread_id, "cwd": origin["cwd"], "sandbox": sandbox, **approvals, "excludeTurns": True}, None
 
 
+def wake(ws, thread_id):
+    """Load an unloaded agent that spawn-peer created, with its recorded settings. Returns (woke, why not)."""
+    params, why = wake_params(thread_id)
+    if params and archived(ws, thread_id):
+        params, why = None, "it is archived. Resume it first"
+    if not params:
+        return False, why
+    ws.rpc("thread/resume", params)
+    return True, None
+
+
 def prepare(thread):
     """Before `codex queue`: {thread_id, thread_status, woke, note}. Raises CodexError."""
     out = {"thread_id": None, "thread_status": None, "woke": False, "note": None}
-    ws = CodexWS()
+    ws = CodexWS(experimental=True)
     try:
         found = resolve(ws, thread)
         if found is None:
@@ -78,10 +110,7 @@ def prepare(thread):
             return out
         out["thread_id"], out["thread_status"] = found["id"], status_type(found)
         if out["thread_status"] == "notLoaded":
-            params, out["note"] = wake_params(found["id"])
-            if params:
-                ws.rpc("thread/resume", params)
-                out["woke"] = True
+            out["woke"], out["note"] = wake(ws, found["id"])
     finally:
         ws.close()
     return out
@@ -102,31 +131,33 @@ def is_ours(item, queued_id, marker):
 def confirm(thread_id, queued_id, woke=False, wait=DEFAULT_WAIT, marker=None):
     """After `codex queue`: {delivery, woke, note}. `marker` is text only our message holds.
     `delivery` is one of
-    started     a turn took the message
+    started     the message left the queue and a turn is running: both, because a message can also
+                leave the queue without any turn taking it
     waiting     the thread is running a turn, and takes the message when that turn ends
     not-loaded  nothing will run it until the thread is opened
     stuck       the thread is loaded and idle, and the message was still queued after `wait` seconds
+    unknown     it left the queue, but no running turn was seen before `wait` ran out
     Raises CodexError, which the caller reports as `unknown`."""
     ws = CodexWS(experimental=True)
     try:
         deadline = time.monotonic() + wait
         while True:
-            items = ws.rpc("thread/queue/list", {"threadId": thread_id}).get("data", [])
-            if not any(is_ours(item, queued_id, marker) for item in items):
-                return {"delivery": "started", "woke": woke, "note": None}
+            queued = any(is_ours(item, queued_id, marker) for item in queue_items(ws, thread_id))
             status = status_type(read_thread(ws, thread_id))
             if status == "active":
-                return {"delivery": "waiting", "woke": woke, "note": None}
-            if status == "notLoaded":
+                return {"delivery": "waiting" if queued else "started", "woke": woke, "note": None}
+            if queued and status == "notLoaded":
                 # The daemon can unload the thread between prepare() and the queue.
-                params, why = (None, "it was woken, and unloaded again") if woke else wake_params(thread_id)
-                if not params:
+                done, why = (False, "it was woken, and unloaded again") if woke else wake(ws, thread_id)
+                if not done:
                     return {"delivery": "not-loaded", "woke": woke, "note": why}
-                ws.rpc("thread/resume", params)
                 woke = True
                 continue
             if time.monotonic() >= deadline:
-                return {"delivery": "stuck", "woke": woke, "note": f"thread status {status}"}
+                if queued:
+                    return {"delivery": "stuck", "woke": woke, "note": f"thread status {status}"}
+                return {"delivery": "unknown", "woke": woke,
+                        "note": f"it left the queue, but no turn was seen running (thread status {status})"}
             time.sleep(POLL)
     finally:
         ws.close()
@@ -143,8 +174,8 @@ def main(argv):
         else:
             print(main.__doc__, file=sys.stderr)
             return 2
-    except (CodexError, OSError, ValueError, KeyError, TypeError) as exc:
-        out = {"error": str(exc)[:300] or type(exc).__name__}
+    except Exception as exc:  # noqa: BLE001 -- any failure is an unanswered check, reported as unknown
+        out = {"error": f"{type(exc).__name__}: {exc}"[:300]}
     print(json.dumps(out))
     return 0
 

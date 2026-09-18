@@ -186,7 +186,7 @@ class MenuActionsTest(unittest.TestCase):
 
     def headless_codex(self, status, spawned):
         """A Codex agent with no pane, on a fake daemon whose queue behaves like the real one."""
-        from test_send_to_codex import QUEUEING_STUB
+        from test_peers import QUEUEING_STUB
         daemon = FakeCodexDaemon(self.m.sock)
         daemon.threads[THREAD] = {"id": THREAD, "name": "quiet", "cwd": "/w"}
         daemon.status[THREAD] = status
@@ -208,6 +208,22 @@ class MenuActionsTest(unittest.TestCase):
         self.assertEqual((params["sandbox"], params["approvalPolicy"]), ("read-only", "on-request"))
         self.assertLess(daemon.methods().index("thread/resume"), daemon.methods().index("thread/queue/add"))
         self.assertEqual(self.m.actions()[-1]["delivery"], "started")
+
+    def test_a_failed_check_after_the_queue_still_reports_queued_so_nothing_is_sent_twice(self):
+        daemon, agent = self.headless_codex("idle", spawned=True)
+        with mock.patch.object(menu_actions.codex_delivery, "confirm", side_effect=PermissionError("spawn log")):
+            note, ok, _ = menu_actions.perform(agent, "Send", "Please retry the push")
+        self.assertTrue(ok, note)                     # the popup clears the line: the text is queued
+        self.assertTrue(note.startswith("queued, but"), note)
+        self.assertEqual(len(daemon.params("thread/queue/add")), 1)
+
+    def test_a_torn_spawn_record_neither_crashes_the_popup_nor_blocks_the_send(self):
+        daemon, agent = self.headless_codex("notLoaded", spawned=False)
+        with open(self.m.dir / "spawned.jsonl", "wb") as fh:
+            fh.write(b'{"event": "spawned", "kind": "codex", "id": "' + THREAD.encode() + b'", "name": "caf\xc3')
+        note, ok, _ = menu_actions.perform(agent, "Send", "Please retry the push")
+        self.assertTrue(ok, note)
+        self.assertEqual(len(daemon.params("thread/queue/add")), 1)
 
     def test_a_headless_codex_that_is_not_ours_is_never_woken_and_the_menu_says_it_waits(self):
         daemon, agent = self.headless_codex("notLoaded", spawned=False)
