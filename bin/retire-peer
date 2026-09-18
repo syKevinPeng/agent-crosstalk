@@ -27,6 +27,16 @@ def claude_bin():
     return os.environ.get("CLAUDE_BIN") or "claude"
 
 
+def claude_running(short_id):
+    """Is the session in the plain `claude agents --json` listing, which holds running sessions only?
+    A listing that cannot be read is an error, never a sign that the session stopped."""
+    listed = subprocess.run([claude_bin(), "agents", "--json"], capture_output=True, text=True, timeout=30)
+    if listed.returncode != 0:
+        raise RuntimeError(f"`claude agents --json` exited {listed.returncode}")
+    sessions = json.loads(listed.stdout or "[]")
+    return any(isinstance(s, dict) and s.get("id") == short_id for s in sessions)
+
+
 def check_same(what, live, recorded):
     # An unnamed Codex thread is accepted: spawn-peer records before it names.
     for field in ("name", "cwd"):
@@ -81,6 +91,7 @@ def main(argv):
               f"{origin.get('name')!r} ({args.id}). Nothing contacted, nothing changed.")
         return 0
 
+    already_stopped = False
     try:
         if kind == "codex":
             ws = CodexWS()
@@ -100,10 +111,13 @@ def main(argv):
             if len(live) != 1:
                 raise Mismatch(f"expected exactly 1 live Claude session with id {args.id}, found {len(live)}")
             check_same("claude", live[0], origin)
-            # Never pass --discard-unpushed or --force-remove-worktree: those are the owner's call.
-            done = subprocess.run([claude_bin(), action, args.id], capture_output=True, text=True, timeout=120)
-            if done.returncode != 0:
-                raise RuntimeError(f"`claude {action}` exited {done.returncode}: {done.stderr.strip()[-200:]}")
+            # A finished session is listed by --all only. There is nothing to stop, so only the record is written.
+            already_stopped = action == "stop" and not claude_running(args.id)
+            if not already_stopped:
+                # Never pass --discard-unpushed or --force-remove-worktree: those are the owner's call.
+                done = subprocess.run([claude_bin(), action, args.id], capture_output=True, text=True, timeout=120)
+                if done.returncode != 0:
+                    raise RuntimeError(f"`claude {action}` exited {done.returncode}: {done.stderr.strip()[-200:]}")
     except Mismatch as exc:
         print(f"retire-peer: {exc}; refusing to touch it", file=sys.stderr)
         return EXIT_REFUSED
@@ -113,13 +127,18 @@ def main(argv):
 
     line = {"time_utc": spawn_log.now(), "event": "retired", "kind": kind, "id": args.id,
             "action": action, "retired_by": args.sender, "approval": args.approval.strip() or None}
+    if already_stopped:
+        line["already_stopped"] = True
     try:
         spawn_log.append(line)
     except OSError:
         print(f"retire-peer: `{action}` was applied but could not be recorded; unlogged line:", file=sys.stderr)
         print(json.dumps(line, ensure_ascii=False), file=sys.stderr)
         return EXIT_LOG
-    print(f"Applied `{action}` to {kind} agent {origin.get('name')!r} ({args.id}).")
+    if already_stopped:
+        print(f"Recorded {kind} agent {origin.get('name')!r} ({args.id}) as retired; it had already stopped.")
+    else:
+        print(f"Applied `{action}` to {kind} agent {origin.get('name')!r} ({args.id}).")
     return 0
 
 

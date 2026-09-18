@@ -103,7 +103,7 @@ def short_folder(path, columns, ellipsis="…"):
 
 def status(agent):
     """The one state a row shows, most urgent first. A retired or quit agent shows nothing else."""
-    if agent.retired or agent.quit:
+    if agent.retired or agent.parked:
         return "stopped"
     if agent.auth:
         return "auth"
@@ -129,7 +129,7 @@ def mark(agent, glyphs=None, frame=0):
 def header(snapshot, columns=34, glyphs=None):
     """The counts that matter, in words when they fit and as bare marks when they do not."""
     glyphs = glyphs or menu_style.UNICODE
-    agents = [a for a in snapshot.by_key.values() if not a.quit]   # quit agents are parked, not waiting
+    agents = [a for a in snapshot.by_key.values() if not a.parked]   # parked agents are not waiting
     counts = [(glyphs["auth"], sum(1 for a in agents if a.auth), "needs login"),
               (glyphs["needs"], sum(1 for a in agents if a.needs_owner and not a.auth), "need you"),
               (glyphs["unanswered"], sum(a.open_messages for a in agents), "unanswered")]
@@ -164,6 +164,16 @@ def rows(snapshot, columns, collapsed=(), glyphs=None, frame=0, tier=None):
     tier = tier or tier_for(columns)
     kind_columns = kind_width(snapshot)
     mark_columns = max([width(mark(a, glyphs, frame)) for a in snapshot.by_key.values()] or [1])
+
+    def spare(tier):
+        """Columns left for indentation once a row holds its lead, fold, a 4-cell name, the gap, the
+        columns on the right and the held-back last cell. Below zero the row cannot fit at all."""
+        right = {"narrow": mark_columns, "normal": kind_columns + 1 + mark_columns,
+                 "wide": kind_columns + 2 + FOLDER_COLUMNS + 2 + MODEL_COLUMNS + 1 + mark_columns}[tier]
+        return columns - (1 + 2 + 4 + 1 + right + 1)
+    if tier == "wide" and spare("wide") < 0:
+        tier = "normal"          # no room for the folder and model: drop them, never the mark at the end
+    indent_room = max(spare(tier) // 2, 0)
     out = [{"text": fit(header(snapshot, columns, glyphs), columns, glyphs["ellipsis"]),
             "key": "", "style": "header", "mark": "", "look": ""}]
     for error in snapshot.errors:
@@ -175,7 +185,7 @@ def rows(snapshot, columns, collapsed=(), glyphs=None, frame=0, tier=None):
         if tier == "narrow":
             right = sign                                   # a strip says who needs you, nothing else
         else:
-            kind = "quit" if agent.quit else ("retired" if agent.retired else
+            kind = "quit" if agent.parked else ("retired" if agent.retired else
                                               f"{agent.access + ' ' if agent.access else ''}{agent.kind}")
             right = f"{kind} {sign}"
             if tier == "wide":
@@ -185,7 +195,7 @@ def rows(snapshot, columns, collapsed=(), glyphs=None, frame=0, tier=None):
         room = columns - width(prefix) - width(fold) - width(right) - 2
         name = fit(agent.name, max(room, 4), glyphs["ellipsis"])
         gap = " " * max(columns - width(prefix) - width(fold) - width(name) - width(right) - 1, 1)
-        style = "quit" if agent.quit else ("retired" if agent.retired else "row")
+        style = "quit" if agent.parked else ("retired" if agent.retired else "row")
         out.append({"text": f"{prefix}{fold}{name}{gap}{right}", "key": agent.key,
                     "style": style, "mark": sign, "look": status(agent)})
 
@@ -199,7 +209,7 @@ def rows(snapshot, columns, collapsed=(), glyphs=None, frame=0, tier=None):
         if depth == 0:
             add(agent, " ", (glyphs["closed"] if folded else glyphs["open"]) if agent.children else glyphs["leaf"])
         else:
-            levels = min(depth, MAX_INDENT, max((columns - 22) // 2, 0))   # a narrow pane indents less
+            levels = min(depth, MAX_INDENT, max((columns - 22) // 2, 0), indent_room)   # a narrow pane indents less
             add(agent, " " + "  " * levels, glyphs["last"] if last else glyphs["branch"])
         if not folded:
             for index, child in enumerate(agent.children):

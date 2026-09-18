@@ -38,11 +38,16 @@ OUTPUT_PATTERNS = [
 ]
 
 
+def tail(text):
+    """The last non-blank lines of a pane, with the chrome a CLI draws in front of them removed."""
+    return [re.sub(CHROME, "", line).rstrip() for line in (text or "").splitlines() if line.strip()][-TAIL_LINES:]
+
+
 def detect_screen(text):
     """Label of the auth prompt at the bottom of a pane, or None."""
-    tail = [re.sub(CHROME, "", line).rstrip() for line in (text or "").splitlines() if line.strip()][-TAIL_LINES:]
+    lines = tail(text)
     for label, pattern in SCREEN_PATTERNS:
-        if any(re.search(pattern, line) for line in tail):
+        if any(re.search(pattern, line) for line in lines):
             return label
     return None
 

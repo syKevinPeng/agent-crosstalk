@@ -125,7 +125,11 @@ state="$STUB_DIR/sessions.json"; [[ -f $state ]] || echo '[]' > "$state"
 printf '%s\n' "$PWD" "$@" >> "$STUB_DIR/claude-argv.txt"; echo '--' >> "$STUB_DIR/claude-argv.txt"
 case $1 in
   agents) [[ -n ${STUB_AGENTS_FAIL_AFTER_LAUNCH:-} && -f "$STUB_DIR/launched" ]] && exit 5
-          cat "$state" ;;
+          [[ -n ${STUB_PLAIN_AGENTS_FAIL:-} && " $* " != *" --all "* ]] && exit 6
+          # finished.json holds sessions that stopped: `--all` lists them, the plain listing does not
+          if [[ " $* " == *" --all "* && -f "$STUB_DIR/finished.json" ]]; then
+            jq -s 'add' "$state" "$STUB_DIR/finished.json"
+          else cat "$state"; fi ;;
   --bg) echo "${STUB_BG_OUTPUT:-started ab12cd34}"; touch "$STUB_DIR/launched"
         [[ -n ${STUB_NEVER_LISTED:-} ]] && exit 0
         jq --arg n "$3" --arg c "${STUB_REGISTER_CWD:-$PWD}" '. + [{"id":"ab12cd34","sessionId":"ab12cd34-0000-4000-8000-000000000000","name":$n,"cwd":$c,"kind":"background"}]' "$state" > "$state.new" && mv "$state.new" "$state" ;;
@@ -432,6 +436,25 @@ class PeersTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("\nstop\nab12cd34\n", self.claude_argv())
         self.assertEqual(self.records()[-1]["action"], "stop")
+
+    def test_retire_claude_records_a_finished_session_without_stopping_it(self):
+        """A session that already stopped is listed by `--all` only. Retiring it writes the record and
+        runs no `claude stop`, which has nothing to stop."""
+        self.spawn_claude()
+        state = self.tmp / "sessions.json"
+        (self.tmp / "finished.json").write_text(state.read_text())
+        state.write_text("[]")
+        proc = self.run_tool(RETIRE, "ab12cd34", "owner/agent-menu")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("\nstop\n", self.claude_argv())
+        self.assertEqual((self.records()[-1]["action"], self.records()[-1]["already_stopped"]), ("stop", True))
+
+    def test_retire_claude_does_not_take_an_unreadable_listing_for_a_stopped_session(self):
+        self.spawn_claude()
+        proc = self.run_tool(RETIRE, "ab12cd34", "owner/agent-menu", STUB_PLAIN_AGENTS_FAIL="1")
+        self.assertEqual(proc.returncode, 4, proc.stderr)
+        self.assertEqual(len(self.records()), 1)                              # only the spawn record
+        self.assertNotIn("\nstop\n", self.claude_argv())
 
     def test_retire_claude_rm_passes_no_force_flags(self):
         self.spawn_claude()

@@ -23,6 +23,13 @@ from sources.base import SourceError  # noqa: E402
 REFRESH_SECONDS = 2.0
 LIMITS_SECONDS = 15 * 60   # rate limits move slowly, and each Claude reading leaves a transcript file
 TICK_MS = 150
+# tmux starts the popup with the server's environment, not this process's. These settings decide what
+# the popup offers (look-only mode above all) and which logs and programs it uses, so the popup's
+# command line carries them over.
+POPUP_ENV = ("AGENT_MENU_LOOK_ONLY", "AGENT_MENU_ASCII", "AGENT_MENU_NO_ANIMATION", "NO_COLOR", "FORCE_COLOR",
+             "LANG", "LC_ALL", "LC_CTYPE", "PATH", "AGENT_MENU_ACTIONS_LOG", "AGENT_MENU_PROC_ROOT",
+             "AGENT_COMMS_LOG", "AGENT_COMMS_SPAWN_LOG", "TMUX_BIN", "CLAUDE_BIN", "CODEX_BIN",
+             "CODEX_APP_SERVER_SOCK")
 ACTIONS = {curses.KEY_DOWN: "down", ord("j"): "down", curses.KEY_UP: "up", ord("k"): "up",
            curses.KEY_RIGHT: "right", ord("l"): "right", curses.KEY_LEFT: "left", ord("h"): "left",
            curses.KEY_HOME: "home", ord("g"): "home", curses.KEY_END: "end", ord("G"): "end", ord(" "): "toggle"}
@@ -60,11 +67,17 @@ class Poller(threading.Thread):
             self.wake.clear()
 
 
+def detail_command(key, environ=None):
+    """The popup's shell command, with this process's POPUP_ENV settings passed through `env`."""
+    environ = os.environ if environ is None else environ
+    settings = [f"{name}={environ[name]}" for name in POPUP_ENV if name in environ]
+    parts = (["env", *settings] if settings else []) + [sys.executable, os.path.join(BIN, "agent-menu-detail"), key]
+    return " ".join(shlex.quote(part) for part in parts)
+
+
 def open_detail(agent):
-    command = " ".join(shlex.quote(part) for part in
-                       (sys.executable, os.path.join(BIN, "agent-menu-detail"), agent.key))
     try:
-        tmux_src.popup(command, title=f" {agent.name} ")
+        tmux_src.popup(detail_command(agent.key), title=f" {agent.name} ")
     except SourceError as exc:
         return str(exc)
     return ""
@@ -179,10 +192,10 @@ def run(screen):
         elif pressed in (curses.KEY_ENTER, 10, 13):
             target = selected
         elif pressed == curses.KEY_MOUSE:
-            try:
-                _, x, y, _, _ = curses.getmouse()
-            except curses.error:
-                continue
+            spot = menu_curses.click()
+            if not spot:
+                continue                   # a release or a wheel turn: only a press or click opens or folds
+            x, y = spot
             key = menu_render.key_at(rendered, y)
             if not key:
                 continue
@@ -201,7 +214,10 @@ def main(argv):
     parser.add_argument("--once", action="store_true", help="print the tree once as plain text and exit")
     parser.add_argument("--columns", type=int, default=34, help="with --once: width to render (default 34)")
     args = parser.parse_args(argv)
-    locale.setlocale(locale.LC_ALL, "")
+    try:
+        locale.setlocale(locale.LC_ALL, "")
+    except locale.Error:
+        pass  # the environment names a locale that is not installed: run in the default one, not crash
     if args.once:
         for row in menu_render.rows(agent_state.collect(), args.columns, glyphs=menu_style.glyphs()):
             print(row["text"])

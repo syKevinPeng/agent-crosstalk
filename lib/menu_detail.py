@@ -22,8 +22,13 @@ def look_only(environ=None):
 
 
 def can_quit(agent):
-    """Quit stops or archives an agent so it can be resumed. Nothing is deleted."""
-    if agent.quit or agent.retired or agent.pane_id:
+    """Quit stops or archives an agent so it can be resumed. Nothing is deleted.
+    A Claude session spawn-peer made that stopped without being retired is still offered Quit: it only
+    records the retirement, which moves the agent from the tree to the QUIT group. An archived Codex
+    thread cannot be told from a live one by `retire-peer`, so that one is resumed first."""
+    if agent.quit:
+        return agent.kind == "claude" and agent.spawned and not agent.retired
+    if agent.retired or agent.pane_id:
         return False                              # one running in a pane is quit there, not from here
     if agent.kind == "codex":
         return True
@@ -45,6 +50,8 @@ def can_resume(agent):
 
 def quit_effect(agent):
     """What Quit does to this agent, in the owner's words."""
+    if agent.quit:
+        return "record it as retired (it has already stopped)"
     if agent.kind == "codex":
         return "archive it"
     return "stop it (its conversation is kept)"
@@ -59,7 +66,8 @@ def buttons(agent):
     """Only actions that can work for this agent are offered."""
     out = []
     if agent.quit:
-        return ["Resume"] if can_resume(agent) else []
+        out = ["Resume"] if can_resume(agent) else []
+        return out + (["Quit agent"] if can_quit(agent) and not look_only() else [])
     if agent.retired:
         return []
     if agent.pane_id:
@@ -83,9 +91,16 @@ def button_labels(offered, columns):
 
 
 def can_instruct(agent):
-    if agent.auth or agent.retired or agent.quit or look_only():
+    """An instruction typed into a pane lands on whatever the pane shows, so typing stops while it
+    shows a credential prompt or waits on the owner: there Enter or a letter would answer the prompt.
+    A Codex agent with no pane gets the instruction through `codex queue`, which types into nothing,
+    so a login problem its latest answer reports leaves the instruction line on for the retry.
+    A quit agent takes no instruction until it is resumed."""
+    if agent.retired or agent.quit or look_only():
         return False
-    return bool(agent.pane_id) or agent.kind == "codex"
+    if agent.pane_id:
+        return not (agent.auth or agent.needs_owner)
+    return agent.kind == "codex"
 
 
 def title(agent, parent_name):
@@ -110,15 +125,27 @@ def body(agent, recent, reply, columns, glyphs=None):
         out.append(("QUIT", "head"))
         how = ("It is archived. Resume unarchives it and opens it in a new window." if agent.kind == "codex"
                else "It is stopped and its conversation was kept. Resume attaches it in a new window.")
+        if can_quit(agent):
+            how += " Nobody retired it yet, so it keeps its place in the tree. Quit records it as retired."
         out += _wrapped(how, columns, "plain")
-    elif agent.auth:
+    elif agent.auth and agent.pane_id:
         out.append(("NEEDS LOGIN", "head"))
         out += _wrapped(f"This agent is waiting for a credential: {agent.auth}.", columns, "warn")
         out += _wrapped("Open its pane and type it there. The menu never carries or records a secret.", columns, "plain")
+    elif agent.auth:
+        out.append(("NEEDS LOGIN", "head"))
+        out += _wrapped(f"Its latest answer reports a login problem: {agent.auth}.", columns, "warn")
+        out += _wrapped("Log in from your own terminal, then send it an instruction to try again. The menu never "
+                        "carries or records a secret.", columns, "plain")
     elif agent.needs_owner:
         out.append((f"NEEDS YOU ({agent.needs_owner})", "head"))
-        out += _wrapped("This agent is waiting for an answer from you. Open its pane to read and answer it.",
-                        columns, "warn")
+        if agent.pane_id:
+            where = "Open its pane to read and answer it."
+        elif agent.kind == "codex":
+            where = f"It has no pane: open it in a terminal with `codex resume {agent.session_id}` to read and answer it."
+        else:
+            where = "It runs in no pane: attach it to read and answer it."
+        out += _wrapped(f"This agent is waiting for an answer from you. {where}", columns, "warn")
     else:
         out.append((f"STATE      {LABELS[menu_render.status(agent)]}", "head"))
     if agent.children:
@@ -145,10 +172,12 @@ def body(agent, recent, reply, columns, glyphs=None):
             why = "it is quit: Resume brings it back"
         elif look_only():
             why = "look-only mode: no instruction line and no Quit"
-        elif agent.auth:
-            why = "instruction line is off while a credential prompt is on screen"
         elif agent.retired:
             why = "this agent is retired"
+        elif agent.auth:
+            why = "instruction line is off while a credential prompt is on screen"
+        elif agent.needs_owner and agent.pane_id:
+            why = "instruction line is off while it waits for your answer: typed text would answer its prompt"
         else:
             why = "a Claude session with no pane takes input only in its own terminal: use Attach"
         out.append(("", "blank"))

@@ -1,5 +1,6 @@
 """Tests for quitting an agent and resuming it later. Nothing here deletes anything: Codex threads
 are archived and unarchived, Claude background sessions are stopped and attached again."""
+import json
 import os
 import sys
 import tempfile
@@ -67,7 +68,7 @@ class QuitResumeTest(unittest.TestCase):
         self.assertFalse(self.agent(f"claude:{LIVE_CLAUDE}").quit)
 
     def test_a_session_listed_twice_is_live_when_either_listing_is_live(self):
-        self.m.claude_quit.append(dict(self.m.claude[0], state="done", pid=None))   # an earlier finished run
+        self.m.claude_finished.append(dict(self.m.claude[0], state="done", pid=None))   # an earlier finished run
         self.m.write()
         sessions = {s["session_id"]: s for s in claude_src.list_sessions(include_quit=True)}
         self.assertFalse(sessions[LIVE_CLAUDE]["quit"])
@@ -76,7 +77,7 @@ class QuitResumeTest(unittest.TestCase):
     def test_a_stopped_session_never_carries_a_process_id(self):
         """If the CLI ever reports a stale pid for a stopped session, it must not be kept: a reused pid
         could otherwise match some other process to a pane."""
-        self.m.claude_quit[0]["pid"] = 500
+        self.m.claude_finished[0]["pid"] = 500
         self.m.write()
         parked = [s for s in claude_src.list_sessions(include_quit=True) if s["session_id"] == DONE_CLAUDE]
         self.assertEqual(parked[0]["pid"], None)
@@ -216,9 +217,52 @@ class QuitResumeTest(unittest.TestCase):
         self.assertIn("Quit agent", menu_detail.buttons(again))
         menu_actions.quit_agent(again)                                       # retire-peer allows it now
         self.assertEqual(self.daemon.params("thread/archive"), [{"threadId": LIVE_CODEX}] * 2)
-        events = [line["event"] for line in map(__import__("json").loads,
+        events = [line["event"] for line in map(json.loads,
                                                 (self.m.dir / "spawned.jsonl").read_text().splitlines())]
         self.assertEqual(events, ["spawned", "retired", "resumed", "retired"])
+
+    def test_a_stopped_spawned_claude_session_is_quit_by_recording_it(self):
+        """A spawned Claude session that finished on its own keeps its place in the tree. Quit then only
+        records the retirement: there is nothing left to stop, so no `claude stop` runs."""
+        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "claude", "name": "parked one", "id": DONE_CLAUDE[:8],
+                                     "cwd": "/w", "access": "read-only", "spawned_by": "codex/x"})
+        done = self.agent(f"claude:{DONE_CLAUDE}", include_quit=False)
+        self.assertEqual((done.quit, done.parked), (True, False))
+        self.assertEqual(menu_detail.buttons(done), ["Resume", "Quit agent"])
+        self.assertIn("already stopped", menu_detail.confirm_text(done))
+        menu_actions.quit_agent(done)
+        self.assertNotIn(f"stop {DONE_CLAUDE[:8]}", self.m.claude_calls())
+        record = json.loads((self.m.dir / "spawned.jsonl").read_text().splitlines()[-1])
+        self.assertEqual((record["event"], record.get("already_stopped")), ("retired", True))
+        again = self.agent(f"claude:{DONE_CLAUDE}")
+        self.assertEqual((again.retired, menu_detail.buttons(again)), (True, ["Resume"]))
+        with self.assertRaises(menu_actions.Refused):
+            menu_actions.quit_agent(again)                                   # a second Quit has nothing to record
+
+    def test_an_archived_spawned_codex_thread_is_resumed_before_it_is_quit(self):
+        """retire-peer cannot tell an archived thread from a live one, so an archived thread nobody retired
+        offers Resume only. Resume and then Quit retires it the ordinary way."""
+        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "archived thread",
+                                     "id": ARCHIVED_CODEX, "access": "read-only", "spawned_by": "claude/x"})
+        archived = self.agent(f"codex:{ARCHIVED_CODEX}")
+        self.assertEqual((archived.quit, archived.spawned, archived.retired), (True, True, False))
+        self.assertEqual(menu_detail.buttons(archived), ["Resume"])
+
+    def test_a_quit_agent_takes_no_instruction(self):
+        archived = self.agent(f"codex:{ARCHIVED_CODEX}")
+        self.assertFalse(menu_detail.can_instruct(archived))                 # a Codex thread with no pane otherwise could
+        self.assertEqual(menu_actions.perform(archived, "Send", "hello")[:2], ("not done: that is no longer offered for this agent", False))
+
+    def test_the_quit_group_is_empty_until_the_owner_asks_for_it(self):
+        """Without `a`, a parked agent can still reach the snapshot through its spawn record, for example
+        one with a retirement time in the future, which counts as a bad record and so as long retired."""
+        self.m.log("spawned.jsonl",
+                   {"event": "spawned", "kind": "claude", "name": "parked one", "id": DONE_CLAUDE[:8], "cwd": "/w",
+                    "access": "read-only", "spawned_by": "codex/x"},
+                   {"event": "retired", "kind": "claude", "id": DONE_CLAUDE[:8], "action": "stop",
+                    "time_utc": "2999-01-01T00:00:00Z"})
+        self.assertEqual(self.snap(include_quit=False).quit_agents, [])
+        self.assertIn(f"claude:{DONE_CLAUDE}", [a.key for a in self.snap(include_quit=True).quit_agents])
 
     def test_a_live_agent_whose_parent_was_quit_stays_in_the_tree(self):
         self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "idle thread", "id": LIVE_CODEX,
@@ -230,7 +274,12 @@ class QuitResumeTest(unittest.TestCase):
         with self.assertRaises(menu_actions.Refused):
             menu_actions.resume(self.agent(f"codex:{LIVE_CODEX}"))
         parked = self.agent(f"claude:{DONE_CLAUDE}")
-        self.m.claude_quit[0]["name"] = "renamed"
+        self.m.claude_finished[0]["name"] = "renamed"
+        self.m.write()
+        with self.assertRaises(menu_actions.Refused):
+            menu_actions.resume(parked)
+        self.m.claude_finished[0]["name"] = "parked one"                     # running again since it was read
+        self.m.claude_session(DONE_CLAUDE, "parked one", 600)
         self.m.write()
         with self.assertRaises(menu_actions.Refused):
             menu_actions.resume(parked)

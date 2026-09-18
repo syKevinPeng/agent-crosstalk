@@ -8,6 +8,11 @@ from sources import claude_src, codex_src, logs_src, tmux_src
 from sources.base import SourceError, clean
 
 RETIRED_VISIBLE = datetime.timedelta(minutes=10)
+QUESTIONS = re.compile(r"\?\s+(\d+) questions?\b")
+# An approval menu at the bottom of a pane, as both CLIs draw it: a first option "1. Yes…" and a later
+# "N. No…", with an optional selection cursor in front.
+APPROVAL_YES = re.compile(r"^(?:[❯›>]\s*)?1\.\s+Yes\b")
+APPROVAL_NO = re.compile(r"^(?:[❯›>]\s*)?\d\.\s+No\b")
 
 
 @dataclasses.dataclass
@@ -22,6 +27,7 @@ class Agent:
     model: str = ""               # only where the CLI reports one: Codex does, Claude does not
     pid: int = 0                  # the session's own process, where the CLI reports one
     quit: bool = False            # stopped (Claude) or archived (Codex); Resume brings it back
+    parked: bool = False          # quit and shown apart, under QUIT, rather than in the tree
     background: bool = False
     needs_owner: int = 0
     auth: str = ""                # auth label, e.g. "ssh key passphrase"
@@ -57,6 +63,17 @@ def title_names(kind, title):
         segments = {title.strip()}
     names = set(segments) | {re.sub(r"^[^\w\s]{1,2}\s+", "", segment) for segment in segments}
     return {clean(name) for name in names if name}
+
+
+def waits_on_owner(title, screen):
+    """True when a pane shows a prompt that waits on the owner: Codex's "Action Required" title, or an
+    approval menu at the bottom of the screen. Text typed into such a pane answers the prompt: Enter
+    picks the highlighted option, and Codex takes single letters as answers too."""
+    if "Action Required" in (title or ""):
+        return True
+    lines = auth_readers.tail(screen)
+    first = next((i for i, line in enumerate(lines) if APPROVAL_YES.search(line)), None)
+    return first is not None and any(APPROVAL_NO.search(line) for line in lines[first + 1:])
 
 
 def pane_for_pid(pid, panes):
@@ -165,10 +182,13 @@ def collect(now=None, include_quit=False):
         spawned = logs_src.spawned()
     except SourceError:
         spawned, _ = [], errors.append("spawn log: unreadable")
-    recent_ids = [s["id"] for s in spawned if s["kind"] == "codex"
-                  and (s["retired_at"] is None or now - s["retired_at"] < RETIRED_VISIBLE)]
-    for label, reader in (("claude", lambda: claude_src.list_sessions(include_quit=include_quit)),
-                          ("codex", lambda: codex_src.list_threads(extra_ids=recent_ids, include_quit=include_quit))):
+    # Spawned agents are looked up by their recorded ids too, because a finished one drops out of
+    # the plain listings while it is still spawn-peer's to retire.
+    recent = [s for s in spawned if s["retired_at"] is None or now - s["retired_at"] < RETIRED_VISIBLE]
+    claude_ids = [s["id"] for s in recent if s["kind"] == "claude"]
+    codex_ids = [s["id"] for s in recent if s["kind"] == "codex"]
+    for label, reader in (("claude", lambda: claude_src.list_sessions(extra_ids=claude_ids, include_quit=include_quit)),
+                          ("codex", lambda: codex_src.list_threads(extra_ids=codex_ids, include_quit=include_quit))):
         try:
             raw.extend(reader())
         except SourceError:
@@ -186,11 +206,24 @@ def collect(now=None, include_quit=False):
         agent.pid, agent._title = entry.get("pid") or 0, ""
         agent.quit = bool(entry.get("quit"))
         agents.append(agent)
-    quit_agents = [a for a in agents if a.quit]
-    agents = [a for a in agents if not a.quit]     # a quit agent has no process, pane or place in the tree
+    # A stopped agent that spawn-peer created is still part of its parent's work, so it stays in the
+    # tree, where its unread messages show, until a while after it is retired: the same while any
+    # retired child stays. Every other stopped agent is parked under QUIT. Either way it is `quit`,
+    # so its popup offers Resume.
+    retire_times = {s["id"]: s["retired_at"] for s in spawned}
+
+    def overdue(agent):
+        retired_at = retire_times.get(agent.session_id) or retire_times.get(agent.short_id)
+        return bool(retired_at) and (now - retired_at >= RETIRED_VISIBLE or retired_at > now)  # a future time is a bad record
+
+    stopped = [a for a in agents if a.quit]
+    _mark_spawned(stopped, spawned)
+    quit_agents = [a for a in stopped if not a.spawned or (a.retired and overdue(a))]
+    for agent in quit_agents:
+        agent.parked = True
+    agents = [a for a in agents if not a.parked]
     _match_panes(agents, panes)
     _link_parents(agents, spawned)
-    _mark_spawned(quit_agents, spawned)
 
     try:
         open_counts = logs_src.open_messages()
@@ -201,34 +234,32 @@ def collect(now=None, include_quit=False):
         if agent.state == "needs_owner":
             agent.needs_owner = 1
         if agent.pane_id:
-            if "Action Required" in agent._title:
-                agent.needs_owner = max(agent.needs_owner, 1)
             try:
                 screen = tmux_src.capture(agent.pane_id)
             except SourceError:
                 screen = ""
+            if waits_on_owner(agent._title, screen):
+                agent.needs_owner = max(agent.needs_owner, 1)
             agent.auth = auth_readers.detect_screen(screen) or ""
-            asked = re.search(r"\?\s+(\d+) questions?\b", screen)
+            asked = QUESTIONS.search(screen)
             if asked and agent.needs_owner:
                 agent.needs_owner = int(asked.group(1))
 
     # Retired children stay visible for a while, then drop off. Stopped non-spawned threads with
     # nothing open are history, not agents, so they are left out.
-    retire_times = {s["id"]: s["retired_at"] for s in spawned}
     visible = []
     for agent in agents:
-        retired_at = retire_times.get(agent.session_id) or retire_times.get(agent.short_id)
-        overdue = retired_at and (now - retired_at >= RETIRED_VISIBLE or retired_at > now)  # a future time is a bad record
-        if agent.retired and overdue and not agent.open_messages:
+        if agent.retired and overdue(agent) and not agent.open_messages:
             continue
         if agent.state == "stopped" and not agent.spawned and not agent.open_messages and not agent.pane_id:
             continue
         visible.append(agent)
 
-    open_counts_quit = open_counts
+    # The QUIT group is drawn only while the owner asked for it. Without `a`, a stopped agent reaches
+    # this point only through its spawn record, and once it is parked it is not shown.
+    quit_agents = sorted(quit_agents, key=lambda a: a.name.lower()) if include_quit else []
     for agent in quit_agents:
-        agent.open_messages = open_counts_quit.get(agent.session_id, 0)
-    quit_agents.sort(key=lambda a: a.name.lower())
+        agent.open_messages = open_counts.get(agent.session_id, 0)
     by_key = {a.key: a for a in visible + quit_agents}
     in_tree = {a.key: a for a in visible}
     roots = []
