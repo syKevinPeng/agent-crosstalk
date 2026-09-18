@@ -164,7 +164,10 @@ def parse_args(argv):
     if args.session is None or args.sender is None or args.message is None:
         parser.error("expected 3 arguments: session, sender, message")
     if args.message == "-":
-        args.message = sys.stdin.read()
+        try:
+            args.message = sys.stdin.read()
+        except UnicodeDecodeError:
+            parser.error("the message on stdin is not valid UTF-8")
     if not args.sender.strip() or "\n" in args.sender:
         parser.error("sender must be a non-empty single line")
     if not args.message.strip():

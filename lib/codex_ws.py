@@ -28,6 +28,13 @@ class CodexWS:
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.settimeout(timeout)
         try:
+            self._handshake(path, experimental)
+        except BaseException:
+            self._sock.close()
+            raise
+
+    def _handshake(self, path, experimental):
+        try:
             self._sock.connect(path or sock_path())
             key = base64.b64encode(os.urandom(16)).decode()
             self._sock.sendall(
@@ -43,7 +50,7 @@ class CodexWS:
         status = head.split(b"\r\n")[0]
         if b" 101 " not in status + b" ":
             raise CodexError("daemon refused the WebSocket upgrade: " + status.decode(errors="replace")[:80])
-        params = {"clientInfo": {"name": "agent-comms", "version": "1"}}
+        params = {"clientInfo": {"name": "agent-crosstalk", "version": "1"}}
         if experimental:
             params["capabilities"] = {"experimentalApi": True}
         self.rpc("initialize", params)

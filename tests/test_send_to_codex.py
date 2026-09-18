@@ -84,7 +84,7 @@ class SendToCodexTest(unittest.TestCase):
     def test_codex_failure_exits_nonzero_and_logs_error(self):
         stub, _ = make_stub(self.tmp, 7, "error: no such thread")
         proc = run_tool(self.tmp, stub, THREAD, "claude/test", "Summary line")
-        self.assertEqual(proc.returncode, 7)
+        self.assertEqual(proc.returncode, 4)             # "not sent", whatever codex's own status was
         (line,) = read_log(self.tmp)
         self.assertEqual(line["result"], "error")
         self.assertEqual(line["exit_code"], 7)
@@ -196,13 +196,13 @@ class DeliveryTest(unittest.TestCase):
         self.record(record)
         self.daemon.status[THREAD] = "notLoaded"
         proc = self.send()
-        self.assertEqual(proc.returncode, 5, proc.stderr)
+        self.assertEqual(proc.returncode, 6, proc.stderr)
         self.assertNotIn("thread/resume", self.daemon.methods())
 
     def test_an_unloaded_thread_with_no_spawn_record_is_not_woken_and_exits_5(self):
         self.daemon.status[THREAD] = "notLoaded"
         proc = self.send()
-        self.assertEqual(proc.returncode, 5)
+        self.assertEqual(proc.returncode, 6)
         self.assertNotIn("thread/resume", self.daemon.methods())
         self.assertEqual(self.daemon.queued_ids(), {THREAD: ["q-1"]})  # queued, and honestly reported as waiting
         self.assertIn("not loaded", proc.stderr)
@@ -212,7 +212,7 @@ class DeliveryTest(unittest.TestCase):
     def test_a_retired_agent_is_not_woken_until_it_is_resumed(self):
         self.record(self.spawned(), {"event": "retired", "kind": "codex", "id": THREAD, "action": "archive"})
         self.daemon.status[THREAD] = "notLoaded"
-        self.assertEqual(self.send().returncode, 5)
+        self.assertEqual(self.send().returncode, 6)
         self.assertNotIn("thread/resume", self.daemon.methods())
         self.record({"event": "resumed", "kind": "codex", "id": THREAD})
         self.assertEqual(self.send().returncode, 0)
@@ -229,7 +229,7 @@ class DeliveryTest(unittest.TestCase):
         self.daemon.status[THREAD] = "idle"
         self.daemon.stall = True
         proc = self.send()
-        self.assertEqual(proc.returncode, 5)
+        self.assertEqual(proc.returncode, 6)
         self.assertEqual(read_log(self.tmp)[0]["delivery"], "stuck")
 
     def test_an_agent_unloaded_between_the_check_and_the_queue_is_woken_after(self):
@@ -254,7 +254,7 @@ class DeliveryTest(unittest.TestCase):
         self.daemon.status[THREAD] = "notLoaded"
         self.daemon.list_other_ids = True
         proc = self.send()
-        self.assertEqual(proc.returncode, 5, proc.stderr)
+        self.assertEqual(proc.returncode, 6, proc.stderr)
         self.assertEqual(read_log(self.tmp)[0]["delivery"], "not-loaded")
 
     def test_a_listing_in_another_shape_is_unknown_never_started(self):
@@ -263,14 +263,14 @@ class DeliveryTest(unittest.TestCase):
         self.daemon.stall = True
         self.daemon.list_shape = "items"
         proc = self.send()
-        self.assertEqual(proc.returncode, 5, proc.stderr)
+        self.assertEqual(proc.returncode, 6, proc.stderr)
         self.assertEqual(read_log(self.tmp)[0]["delivery"], "unknown")
 
     def test_a_message_gone_from_the_queue_with_no_turn_running_is_not_started(self):
         self.daemon.status[THREAD] = "idle"
         self.daemon.vanish = True
         proc = self.send()
-        self.assertEqual(proc.returncode, 5, proc.stderr)
+        self.assertEqual(proc.returncode, 6, proc.stderr)
         self.assertEqual(read_log(self.tmp)[0]["delivery"], "unknown")
 
     def test_a_turn_that_ends_before_the_first_look_still_counts(self):
@@ -285,7 +285,7 @@ class DeliveryTest(unittest.TestCase):
         self.record(self.spawned())
         self.daemon.status[THREAD] = "notLoaded"
         self.daemon.fail.add("thread/queue/list")
-        self.assertEqual(self.send().returncode, 5)
+        self.assertEqual(self.send().returncode, 6)
         self.assertNotIn("thread/resume", self.daemon.methods())
 
     def test_an_archived_agent_is_never_woken_even_without_a_retired_line(self):
@@ -318,7 +318,7 @@ class DeliveryTest(unittest.TestCase):
     def test_no_daemon_means_unconfirmed_never_success(self):
         stub, _ = make_stub(self.tmp, 0, f"Queued message q-7 for thread {THREAD}.")
         proc = run_tool(self.tmp, stub, THREAD, "claude/test", "Summary", CODEX_APP_SERVER_SOCK=str(Path(self.tmp) / "none.sock"))
-        self.assertEqual(proc.returncode, 5)
+        self.assertEqual(proc.returncode, 6)
         self.assertEqual(read_log(self.tmp)[0]["delivery"], "unknown")
 
 

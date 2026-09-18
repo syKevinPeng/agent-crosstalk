@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(ROOT, "lib"))
 import spawn_log  # noqa: E402
 from codex_ws import CodexError, CodexWS  # noqa: E402
 
-EXIT_LOG, EXIT_USAGE, EXIT_REFUSED, EXIT_FAILED = 1, 2, 3, 4
+EXIT_LOG, EXIT_USAGE, EXIT_REFUSED, EXIT_FAILED, EXIT_MESSAGE = 1, 2, 3, 4, 5
 # How a Codex agent's approval requests are answered while nobody is attached, and its sandbox.
 # The project default is Codex's automatic reviewer. `never` refuses every request instead.
 CODEX_SANDBOX, CODEX_APPROVALS = spawn_log.CODEX_SANDBOX, spawn_log.CODEX_APPROVALS
@@ -123,7 +123,8 @@ def main(argv):
     parser = argparse.ArgumentParser(
         prog="spawn-peer", description="Create a named Claude or Codex agent and record it.",
         epilog="Exit status: 0 created and recorded; 1 created but not recorded (the line is printed); "
-               "2 usage error; 3 refused, nothing created; 4 the create step failed.")
+               "2 usage error; 3 refused, nothing created; 4 the create step failed; 5 created and "
+               "recorded, but the first message was not delivered.")
     parser.add_argument("--dry-run", action="store_true", help="print what would happen; contact nothing")
     parser.add_argument("--cwd", default=os.getcwd(), help="folder the new agent works in (default: current)")
     parser.add_argument("--write", action="store_true",
@@ -145,6 +146,11 @@ def main(argv):
     if args.message == "-":
         args.message = sys.stdin.read()
     args.cwd = os.path.realpath(args.cwd)
+    for label, value in (("name", args.name), ("sender", args.sender), ("message", args.message or "")):
+        try:
+            value.encode("utf-8")  # a byte that is not UTF-8 would fail only after the thread exists
+        except UnicodeEncodeError:
+            parser.error(f"{label} is not valid UTF-8")
     for label, value in (("name", args.name), ("sender", args.sender)):
         if not value.strip() or "\n" in value or value.startswith("-"):
             parser.error(f"{label} must be a non-empty single line that does not start with '-'")
@@ -190,7 +196,9 @@ def main(argv):
             made, refusal, status = spawn_codex(args, access)
         else:
             made, refusal, status = spawn_claude(args, access, f"{header}\n\n{args.message}")
-    except (CodexError, RuntimeError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
+    except (CodexError, RuntimeError, OSError, ValueError, KeyError, TypeError, AttributeError,
+            subprocess.TimeoutExpired) as exc:
+        # AttributeError and TypeError: an answer in a shape these tools do not know, after an upgrade.
         print(f"spawn-peer: {exc}", file=sys.stderr)
         return EXIT_FAILED
     if refusal:
@@ -205,14 +213,12 @@ def main(argv):
     if args.kind == "codex" and (args.message or "").strip():
         sent = subprocess.run([os.path.join(BIN, "send-to-codex"), made["id"], args.sender, "-"],
                               input=args.message, text=True)
-        if sent.returncode == 5:  # send-to-codex: queued, but no turn has taken it
-            print("spawn-peer: the agent exists and is recorded, and the first message is queued, "
-                  "but no turn has taken it (see above)", file=sys.stderr)
-            return EXIT_FAILED
         if sent.returncode != 0:
-            print("spawn-peer: the agent exists and is recorded, but the first message was not queued",
-                  file=sys.stderr)
-            return EXIT_FAILED
+            what = {1: "was queued, but its log line could not be written (see above)",
+                    6: "is queued, but no turn has taken it (see above)"}.get(
+                sent.returncode, "was not queued (see above)")
+            print(f"spawn-peer: the agent exists and is recorded, and its first message {what}", file=sys.stderr)
+            return EXIT_MESSAGE
     return 0
 
 

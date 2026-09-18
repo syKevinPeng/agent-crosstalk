@@ -16,12 +16,18 @@ log_prepare() {
   if [[ -O $file ]]; then chmod go-rwx -- "$file" 2>/dev/null || true; fi
 }
 
+# A writer that died mid-line leaves a last line with no newline. Close it, under the lock, so the next
+# line stands on its own instead of joining the torn one.
+_end_torn_line() {
+  if [[ -s $1 && $(tail -c 1 -- "$1" | wc -l) -eq 0 ]]; then printf '\n' >&9; fi
+}
+
 # log_append <file> <line>: append one line under an exclusive lock, then sync. Non-zero if it was not
 # written. Note the shape: with `if ! { ...; } 9>>file`, bash skips the `!` when the redirection itself
 # fails, so an unwritable log would read as written.
 log_append() {
   local file=$1 line=$2
-  if { flock -x -w 30 9 && printf '%s\n' "$line" >&9 && sync -- "$file"; } 9>>"$file"; then
+  if { flock -x -w 30 9 && _end_torn_line "$file" && printf '%s\n' "$line" >&9 && sync -- "$file"; } 9>>"$file"; then
     return 0
   fi
   return 1

@@ -56,6 +56,7 @@ class FakeCodexDaemon:
         self.vanish = False          # when True, a queued message disappears without any turn taking it
         self.quick_turns = False     # when True, a turn ends at once, before anyone can see it running
         self.turns = {}              # thread id -> turns a queued message started, oldest first
+        self.replies = {}           # method -> a result to send instead, to play a daemon whose answers changed
         self._queued = 0
         self.threads = {f"old-{i}": {"id": f"old-{i}", "name": n, "cwd": "/x"}
                         for i, n in enumerate(existing_names)}
@@ -95,6 +96,8 @@ class FakeCodexDaemon:
         return {tid: [item["id"] for item in items] for tid, items in self.queue.items() if items}
 
     def _answer(self, method, params, experimental=False):
+        if method in self.replies:
+            return self.replies[method]
         if method.startswith("thread/queue/") and not experimental:
             raise LookupError(f"{method} requires experimentalApi capability")
         if method.startswith("thread/queue/") and params.get("threadId") in self.archived:
@@ -184,7 +187,12 @@ class FakeCodexDaemon:
                     except LookupError as exc:
                         body = {"id": msg["id"], "error": {"code": -32600, "message": str(exc)}}
                 out = json.dumps(body).encode()
-                head = bytes([0x81, len(out)]) if len(out) < 126 else bytes([0x81, 126]) + struct.pack(">H", len(out))
+                if len(out) < 126:
+                    head = bytes([0x81, len(out)])
+                elif len(out) < 65536:
+                    head = bytes([0x81, 126]) + struct.pack(">H", len(out))
+                else:
+                    head = bytes([0x81, 127]) + struct.pack(">Q", len(out))
                 conn.sendall(head + out)
         except (ConnectionError, OSError, IndexError):
             pass

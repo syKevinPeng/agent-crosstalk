@@ -135,7 +135,12 @@ def main(argv):
         else:
             listed = subprocess.run([claude_bin(), "agents", "--json", "--all"],
                                     capture_output=True, text=True, timeout=30)
-            sessions = json.loads(listed.stdout or "[]") if listed.returncode == 0 else []
+            # A listing that cannot be read is a failure, never a sign that the session is gone.
+            if listed.returncode != 0:
+                raise RuntimeError(f"`claude agents --json --all` exited {listed.returncode}")
+            sessions = json.loads(listed.stdout or "[]")
+            if not isinstance(sessions, list):
+                raise RuntimeError("`claude agents --json --all` did not print a list")
             live = [s for s in sessions if isinstance(s, dict) and s.get("id") == args.id]
             # The CLI can list one session twice, for example a finished run next to a running one. That
             # is still one session. Two different sessions under one short id are refused.
@@ -157,8 +162,10 @@ def main(argv):
     except Mismatch as exc:
         print(f"retire-peer: {exc}; refusing to touch it", file=sys.stderr)
         return EXIT_REFUSED
-    except (CodexError, RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
-        print(f"retire-peer: {exc}; nothing recorded", file=sys.stderr)
+    except (CodexError, RuntimeError, OSError, ValueError, KeyError, TypeError, AttributeError,
+            subprocess.TimeoutExpired) as exc:
+        # AttributeError and TypeError: an answer in a shape these tools do not know, after an upgrade.
+        print(f"retire-peer: {exc or type(exc).__name__}; nothing recorded", file=sys.stderr)
         return EXIT_FAILED
 
     line = {"time_utc": spawn_log.now(), "event": "retired", "kind": kind, "id": args.id,

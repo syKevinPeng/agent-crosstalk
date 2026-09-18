@@ -167,7 +167,7 @@ class MenuActionsTest(unittest.TestCase):
 
     def test_a_trailing_semicolon_survives(self):
         menu_actions.instruct(self.agent, "run tests; then stop;")
-        self.assertIn("send-keys -t %7 -l -- run tests; then stop\;", self.acted())
+        self.assertIn(r"send-keys -t %7 -l -- run tests; then stop\;", self.acted())
         self.assertEqual(self.m.actions()[0]["instruction"], "run tests; then stop;")
 
     def test_a_headless_codex_gets_plain_owner_input_with_no_teammate_header(self):
@@ -474,7 +474,7 @@ class RealTmuxFormatTest(unittest.TestCase):
         self.assertIn("#{pane_pid}", names)              # not expanded to a number
         time.sleep(1.2)                                  # a #() job would have run by now
         self.assertFalse(marker.exists(), "the window name ran a shell command")
-        self.assertEqual(tmux_src.literal("a#b;"), "a##b\;")
+        self.assertEqual(tmux_src.literal("a#b;"), r"a##b\;")
 
 
 if __name__ == "__main__":

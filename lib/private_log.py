@@ -32,10 +32,15 @@ def private_folder(folder):
 def append_line(path, line):
     """Append one line to a private log under an exclusive lock, then fsync. Raises OSError."""
     private_folder(os.path.dirname(path))
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-    with os.fdopen(fd, "a", encoding="utf-8") as fh:
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
+    # backslashreplace: a lone surrogate, as a JavaScript writer leaves when it cuts an emoji in half,
+    # becomes a \udXXX escape, which inside a JSON string is still valid JSON.
+    with os.fdopen(fd, "a", encoding="utf-8", errors="backslashreplace") as fh:
         _tighten(path, 0o600)
         fcntl.flock(fh, fcntl.LOCK_EX)
+        size = os.fstat(fd).st_size
+        if size and os.pread(fd, 1, size - 1) != b"\n":
+            fh.write("\n")                  # a writer died mid-line: do not join its line
         fh.write(line if line.endswith("\n") else line + "\n")
         fh.flush()
         os.fsync(fh.fileno())
