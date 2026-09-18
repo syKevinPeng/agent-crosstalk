@@ -30,19 +30,7 @@ def claude_bin():
     return os.environ.get("CLAUDE_BIN") or "claude"
 
 
-def protected_roots():
-    """Folders no spawned agent may work in: the tools' own folder and both agents' config."""
-    home = os.path.expanduser("~")
-    roots = [ROOT, os.path.join(home, ".claude"), os.path.join(home, ".codex"),
-             os.environ.get("CLAUDE_CONFIG_DIR"), os.environ.get("CODEX_HOME")]
-    return [os.path.realpath(p) for p in roots if p]
-
-
-def is_protected(cwd):
-    """True if cwd is inside a protected folder, or contains one (for example the home folder)."""
-    def inside(a, b):
-        return a == b or a.startswith(b.rstrip(os.sep) + os.sep)
-    return any(inside(cwd, root) or inside(root, cwd) for root in protected_roots())
+protected_roots, is_protected = spawn_log.protected_roots, spawn_log.is_protected
 
 
 def claude_sessions():
@@ -104,7 +92,8 @@ def spawn_claude(args, access, text):
         return None, f"a Claude session named {args.name!r} already exists", EXIT_REFUSED
     cmd = [claude_bin(), "--bg", "-n", args.name, "--permission-mode", CLAUDE_MODE[access]]
     if access == "read-only":
-        cmd += ["--disallowedTools", CLAUDE_READ_ONLY_DENY]
+        # The folder's own .claude settings are not loaded: their hooks would run outside any read-only rule.
+        cmd += ["--setting-sources", "user", "--disallowedTools", CLAUDE_READ_ONLY_DENY]
     cmd += ["--", text]  # `--` ends the options: the variadic tool flag must not swallow the prompt
     launched = subprocess.run(cmd, cwd=args.cwd, capture_output=True, text=True, timeout=120)
     if launched.returncode != 0:

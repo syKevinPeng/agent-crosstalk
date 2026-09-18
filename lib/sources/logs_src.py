@@ -86,6 +86,7 @@ def recent(agent_id, agent_name, limit=4):
         to_it = agent_id in (record.get("thread_uuid"), record.get("thread"))
         from_it = bool(wanted) and normalise(record.get("sender")) == wanted
         if to_it or from_it:
-            rows.append({"direction": "→" if to_it else "←", "time": (record.get("time_utc") or "")[11:16],
+            sent = parse_time(record.get("time_utc"))          # a forged time is no text at all, only "?"
+            rows.append({"direction": "→" if to_it else "←", "time": sent.astimezone().strftime("%H:%M") if sent else "?",
                          "text": clean(record.get("first_line")), "receipt": record["msg_id"] in received})
     return rows[-limit:]

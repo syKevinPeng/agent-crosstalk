@@ -18,6 +18,7 @@ import auth_readers
 import codex_delivery
 from codex_ws import CodexError, CodexWS
 import menu_detail
+import private_log
 from sources import claude_src, tmux_src
 from sources.base import SourceError, clean
 import spawn_log
@@ -55,11 +56,7 @@ def _log(agent, action, result, **extra):
               "agent_key": agent.key, "agent_name": agent.name, "kind": agent.kind,
               "action": action, "result": result}
     record.update(extra)
-    with open(log_path(), "a", encoding="utf-8") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-        fh.flush()
-        os.fsync(fh.fileno())
+    private_log.append_line(log_path(), json.dumps(record, ensure_ascii=False))
 
 
 def _same_pane(agent):
@@ -336,7 +333,10 @@ def resume(agent):
         note = _note_resumed(agent)          # it is live from here on, whether or not its window opens
         binary = os.environ.get("CODEX_BIN") or "codex"
         try:
-            tmux_src.new_window(agent.name[:20], f"{shlex.quote(binary)} resume {agent.session_id}", cwd=agent.cwd)
+            # A spawned agent resumes with its spawn's own settings: your config.toml defaults can be wider.
+            flags = " ".join(shlex.quote(a) for a in codex_delivery.resume_args(agent.session_id))
+            tmux_src.new_window(agent.name[:20], f"{shlex.quote(binary)} resume {flags + ' ' if flags else ''}"
+                                f"{agent.session_id}", cwd=agent.cwd)
         except SourceError as exc:
             _result(agent, "resume", "unarchived, window failed", error=str(exc))
             raise Refused(f"unarchived, but its window could not open: {exc}{note}") from None

@@ -1,8 +1,12 @@
 """The record of agents created by bin/spawn-peer. retire-peer acts only on these."""
 import datetime
-import fcntl
+import grp
 import json
 import os
+import pwd
+import stat
+
+import private_log
 
 # What a spawn record's `access` and `approvals` mean to the Codex daemon. spawn-peer starts a thread
 # with these, and send-to-codex wakes an unloaded one with the same, so a wake never widens a spawn.
@@ -26,19 +30,53 @@ def now():
 def check_writable():
     """Raise OSError now if a later append would fail, before anything is created."""
     target = path()
-    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
-    with open(target, "a", encoding="utf-8"):
-        pass
+    private_log.private_folder(os.path.dirname(target))
+    os.close(os.open(target, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600))
 
 
 def append(record):
-    target = path()
-    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
-    with open(target, "a", encoding="utf-8") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-        fh.flush()
-        os.fsync(fh.fileno())
+    private_log.append_line(path(), json.dumps(record, ensure_ascii=False))
+
+
+def _personal_group(gid):
+    """A group only you are in: no listed members, and no other user's primary group. Most Linux systems
+    give each user one, so a file your umask left group-writable is still yours alone."""
+    try:
+        if grp.getgrgid(gid).gr_mem:
+            return False
+        return all(p.pw_gid != gid or p.pw_uid == os.getuid() for p in pwd.getpwall())
+    except (KeyError, OSError):
+        return False
+
+
+def trusted():
+    """Can this record be trusted to say what spawn-peer created? Not if another user can write it."""
+    try:
+        st = os.stat(path())
+    except OSError:
+        return False
+    bits = stat.S_IMODE(st.st_mode)
+    if st.st_uid != os.getuid() or bits & 0o002:
+        return False
+    return not bits & 0o020 or _personal_group(st.st_gid)
+
+
+def protected_roots():
+    """Folders no spawned agent may work in: these tools' own folder and both agents' config."""
+    home = os.path.expanduser("~")
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    roots = [root, os.path.join(home, ".claude"), os.path.join(home, ".codex"),
+             os.environ.get("CLAUDE_CONFIG_DIR"), os.environ.get("CODEX_HOME")]
+    return [os.path.realpath(p) for p in roots if p]
+
+
+def is_protected(cwd):
+    """True if cwd is inside a protected folder, or contains one (for example the home folder)."""
+    cwd = os.path.realpath(cwd)
+
+    def inside(a, b):
+        return a == b or a.startswith(b.rstrip(os.sep) + os.sep)
+    return any(inside(cwd, root) or inside(root, cwd) for root in protected_roots())
 
 
 def events_for(agent_id):

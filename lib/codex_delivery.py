@@ -71,11 +71,32 @@ def turn_took(ws, thread_id, queued_id, marker):
     return False
 
 
+def origin_record(thread_id):
+    """The line spawn-peer wrote when it created this Codex agent, or None. Only the FIRST such line
+    counts: spawn-peer writes it before the agent exists, and a later line could be a peer's forgery."""
+    return next((e for e in spawn_log.events_for(thread_id)
+                 if e.get("event") == "spawned" and e.get("kind") == "codex"), None)
+
+
+def resume_args(thread_id):
+    """`codex resume` flags that give a spawned agent its spawn's own settings, else []. A setting the
+    record does not name gets the strictest value, never your config.toml default."""
+    origin = origin_record(thread_id)
+    if origin is None:
+        return []
+    approvals = spawn_log.CODEX_APPROVALS.get(origin.get("approvals")) or {"approvalPolicy": "never"}
+    args = ["-s", spawn_log.CODEX_SANDBOX.get(origin.get("access"), "read-only"), "-a", approvals["approvalPolicy"]]
+    if approvals.get("approvalsReviewer"):
+        args += ["-c", f'approvals_reviewer="{approvals["approvalsReviewer"]}"']
+    return args + (["-C", origin["cwd"]] if origin.get("cwd") else [])
+
+
 def wake_params(thread_id):
     """(thread/resume params, None) for a live Codex agent that spawn-peer created, else (None, why not)."""
+    if not spawn_log.trusted():
+        return None, "the spawn record can be written by other users, so it cannot say what spawn-peer created"
     events = spawn_log.events_for(thread_id)
-    # The latest record counts, as in retire-peer.
-    origin = next((e for e in reversed(events) if e.get("event") == "spawned" and e.get("kind") == "codex"), None)
+    origin = origin_record(thread_id)
     if origin is None:
         return None, "spawn-peer did not create it, so its sandbox and approvals are unknown"
     # Only the latest step counts, as in retire-peer: an agent resumed from the menu is live again.
@@ -86,6 +107,8 @@ def wake_params(thread_id):
     approvals = spawn_log.CODEX_APPROVALS.get(origin.get("approvals"))
     if not sandbox or not approvals or not origin.get("cwd"):
         return None, "its spawn record does not say which folder, sandbox and approvals it runs with"
+    if spawn_log.is_protected(origin["cwd"]):
+        return None, "its folder is a protected one, where no spawned agent may run"
     return {"threadId": thread_id, "cwd": origin["cwd"], "sandbox": sandbox, **approvals, "excludeTurns": True}, None
 
 
@@ -94,6 +117,12 @@ def wake(ws, thread_id):
     params, why = wake_params(thread_id)
     if not params:
         return False, why
+    # The daemon's own record must agree: spawn-peer's thread in the same folder, not one a person started.
+    thread = read_thread(ws, thread_id) or {}
+    if thread.get("threadSource") == "user":
+        return False, "the daemon says a person started it, so spawn-peer did not"
+    if os.path.realpath(thread.get("cwd") or "") != os.path.realpath(params["cwd"]):
+        return False, "its spawn record names another folder than the daemon does"
     # The spawn record misses an archive done by hand, or one whose record line failed. The daemon
     # refuses to list an archived thread's queue and says so. No answer at all is no wake either.
     try:

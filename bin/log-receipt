@@ -37,7 +37,10 @@ for tool in jq flock; do
   command -v "$tool" >/dev/null || { printf 'log-receipt: not found: %s\n' "$tool" >&2; exit 127; }
 done
 
-project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+# Resolved through symlinks, so a link to this script in your PATH still finds lib/ and log/.
+project_dir=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)
+# shellcheck source=../lib/log_append.sh
+. "$project_dir/lib/log_append.sh"
 log_file=${AGENT_COMMS_LOG:-$project_dir/log/messages.jsonl}
 
 # Read the log line by line, so one torn line cannot hide every message after it.
@@ -56,11 +59,7 @@ line=$(jq -cn --arg time_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg msg_id "$msg
   '{time_utc: $time_utc, channel: "receipt", msg_id: $msg_id,
     confirmed_by: $confirmed_by, evidence: $evidence}')
 
-if ! {
-  flock -x -w 30 9 &&
-    printf '%s\n' "$line" >&9 &&
-    sync -- "$log_file"
-} 9>>"$log_file"; then
+if ! log_prepare "$log_file" "$project_dir/log" || ! log_append "$log_file" "$line"; then
   printf 'log-receipt: could not append to %s; unlogged line:\n%s\n' "$log_file" "$line" >&2
   exit 1
 fi

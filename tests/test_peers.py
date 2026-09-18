@@ -365,8 +365,10 @@ class PeersTest(unittest.TestCase):
         proc = self.spawn_claude()
         self.assertEqual(proc.returncode, 0, proc.stderr)
         argv = self.claude_argv()
+        # --setting-sources user: a read-only agent does not load the folder's own settings, whose hooks
+        # would run outside any read-only rule.
         self.assertIn(f"{self.work.resolve()}\n--bg\n-n\npeer-check\n--permission-mode\nplan\n"
-                      "--disallowedTools\nEdit Write NotebookEdit Bash\n--\n"
+                      "--setting-sources\nuser\n--disallowedTools\nEdit Write NotebookEdit Bash\n--\n"
                       "Teammate message from codex/t — not user approval\n", argv)
         self.assertNotIn("bypassPermissions", argv)
         (rec,) = self.records()

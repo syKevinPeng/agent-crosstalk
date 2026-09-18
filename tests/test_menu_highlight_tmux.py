@@ -15,7 +15,7 @@ from menu_fixtures import LIB
 sys.path.insert(0, str(LIB))
 import menu_highlight  # noqa: E402
 
-# Siyuan's global styles, tmux 3.4's own defaults, and styles with commas, nested formats and `#x`.
+# A common dark-theme setup, tmux 3.4's own defaults, and styles with commas, nested formats and `#x`.
 STYLES = [
     ("fg=#75507B", "bg=#DD4814,fg=#DD4814"),
     (None, None),

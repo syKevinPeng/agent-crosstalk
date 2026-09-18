@@ -14,6 +14,10 @@ import struct
 import sys
 import uuid
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "lib"))
+import private_log  # noqa: E402
+from sources.base import clean  # noqa: E402
+
 CHANNEL = "claude socket"
 EXIT_LOG, EXIT_USAGE, EXIT_IDENTITY, EXIT_SOCKET = 1, 2, 3, 4
 
@@ -126,12 +130,7 @@ def write_frames(sock_path, expected_pid, frames):
 
 def append_log(path, record):
     line = json.dumps(record, ensure_ascii=False) + "\n"
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "a", encoding="utf-8") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        fh.write(line)
-        fh.flush()
-        os.fsync(fh.fileno())
+    private_log.append_line(path, line)
     return line
 
 
@@ -183,7 +182,7 @@ def main(argv):
 
     if args.list:
         for entry in load_registry(sdir):
-            print(f"{entry.get('sessionId')}\t{entry.get('name', '')}\t{entry.get('cwd', '')}")
+            print(f"{clean(str(entry.get('sessionId')))}\t{clean(entry.get('name', ''))}\t{clean(entry.get('cwd', ''))}")
         return 0
 
     msg_id = str(uuid.uuid4())
@@ -199,7 +198,7 @@ def main(argv):
 
     if args.dry_run:
         print("DRY RUN: no credential read, no socket opened, nothing sent, nothing logged.")
-        print(f"Recipient: {entry.get('name', '')} ({args.session}), cwd {entry.get('cwd', '')}")
+        print(f"Recipient: {clean(entry.get('name', ''))} ({args.session}), cwd {clean(entry.get('cwd', ''))}")
         print(f"Log file (on a real send): {log_path()}")
         print(f"Logged first line: {first_line}")
         print("Frame 1: {\"type\": \"auth\", \"token\": \"<not read in a dry run>\"}")
@@ -253,7 +252,7 @@ def main(argv):
     if status:
         print(f"send-to-claude: {record['error']}; logged as error", file=sys.stderr)
         return status
-    print(f"Written message {msg_id} to session {args.session} ({entry.get('name', '')}).")
+    print(f"Written message {msg_id} to session {args.session} ({clean(entry.get('name', ''))}).")
     print("Written is not received: wait for a reply or ACK that cites this Msg-ID. Do not resend blindly.")
     print(f"Logged to {log_path()}")
     return 0

@@ -298,8 +298,9 @@ class DeliveryTest(unittest.TestCase):
         self.assertNotIn("thread/resume", self.daemon.methods())
         self.assertEqual(read_log(self.tmp)[0]["delivery_note"], "it is archived. Resume it first")
 
-    def test_the_latest_spawn_record_decides_the_settings(self):
-        self.record(dict(self.spawned(access="write", approvals="never"), approval="owner"), self.spawned())
+    def test_the_first_spawn_record_decides_the_settings(self):
+        # spawn-peer writes the first line before the agent exists. Any later line could be a peer's.
+        self.record(self.spawned(), dict(self.spawned(access="write", approvals="never"), approval="owner"))
         self.daemon.status[THREAD] = "notLoaded"
         self.assertEqual(self.send().returncode, 0)
         (params,) = self.daemon.params("thread/resume")

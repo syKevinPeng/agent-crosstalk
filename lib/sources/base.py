@@ -24,6 +24,13 @@ def clean(text):
     return "".join(ch if ch.isprintable() else "?" for ch in text)
 
 
+def clean_block(text):
+    """clean() for multi-line text such as an agent's answer: line breaks and tabs stay."""
+    if not isinstance(text, str):
+        return ""
+    return "\n".join("\t".join(clean(part) for part in line.split("\t")) for line in text.split("\n"))
+
+
 def read_jsonl(path):
     """Every JSON object in a log file. Torn or foreign lines are skipped, never fatal."""
     try:

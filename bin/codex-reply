@@ -9,6 +9,7 @@ import sys
 BIN = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(BIN), "lib"))
 import codex_delivery  # noqa: E402
+from sources.base import clean, clean_block  # noqa: E402
 from codex_ws import CodexError, CodexWS  # noqa: E402
 
 EXIT_USAGE, EXIT_NOT_FOUND, EXIT_FAILED, EXIT_NOT_DONE, EXIT_QUEUED = 2, 3, 4, 5, 6
@@ -60,10 +61,10 @@ def main(argv):
     if not args.all:
         final = [m for m in messages if m.get("phase") == "final_answer"]
         messages = final or messages[-1:]
-    print(f"# thread {args.thread} ({thread.get('name') or 'unnamed'}{', archived' if archived else ''}), "
+    print(f"# thread {args.thread} ({clean(thread.get('name')) or 'unnamed'}{', archived' if archived else ''}), "
           f"latest turn: {state}")
     for message in messages:
-        print(message.get("text", ""))
+        print(clean_block(message.get("text", "")))  # an agent's answer: its line breaks stay, escapes do not
     if state not in FINISHED:
         return EXIT_NOT_DONE
     if queue_error:

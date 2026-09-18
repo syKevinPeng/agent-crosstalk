@@ -21,6 +21,7 @@ import zoneinfo
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from codex_ws import CodexError, CodexWS  # noqa: E402
 
+import private_log  # noqa: E402
 from .base import SourceError, usage_folder  # noqa: E402
 
 # "Current week (Fable): 16% used · resets Sep 24, 1pm (Europe/Berlin)"
@@ -30,9 +31,7 @@ RESET_ZONE = re.compile(r"^(.{1,40}?)\s*\(([A-Za-z_/+-]{1,40})\)\s*$")
 
 def usage_cwd():
     """Where the Claude call runs, so its transcripts collect in one corner of their own."""
-    folder = usage_folder()
-    os.makedirs(folder, exist_ok=True)
-    return folder
+    return private_log.private_folder(usage_folder())
 
 
 def short_delta(seconds):
@@ -89,7 +88,10 @@ def claude_limits(timeout=25, now=None):
     """[{source, window, model, percent, resets_in}] from Claude Code's own usage command."""
     binary = os.environ.get("CLAUDE_BIN") or "claude"
     try:
-        done = subprocess.run([binary, "-p", "--output-format", "json", "/usage"],
+        # --safe-mode: no hooks, MCP servers, plugins or CLAUDE.md. --setting-sources user: no settings
+        # from the folder it runs in. --no-session-persistence: no transcript left behind.
+        done = subprocess.run([binary, "-p", "--output-format", "json", "--safe-mode", "--no-session-persistence",
+                               "--setting-sources", "user", "/usage"],
                               cwd=usage_cwd(), capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise SourceError(f"claude: {type(exc).__name__}") from None
