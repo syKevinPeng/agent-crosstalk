@@ -20,7 +20,8 @@ def sock_path():
 
 
 class CodexWS:
-    def __init__(self, path=None, timeout=20):
+    def __init__(self, path=None, timeout=20, experimental=False):
+        """`experimental` opts into methods Codex marks experimental, such as `thread/queue/list`."""
         self._next_id = 0
         self._timeout = timeout
         self._buf = b""
@@ -42,7 +43,10 @@ class CodexWS:
         status = head.split(b"\r\n")[0]
         if b" 101 " not in status + b" ":
             raise CodexError("daemon refused the WebSocket upgrade: " + status.decode(errors="replace")[:80])
-        self.rpc("initialize", {"clientInfo": {"name": "agent-comms", "version": "1"}})
+        params = {"clientInfo": {"name": "agent-comms", "version": "1"}}
+        if experimental:
+            params["capabilities"] = {"experimentalApi": True}
+        self.rpc("initialize", params)
         self._send({"method": "initialized"})
 
     def _fill(self):

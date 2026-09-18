@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# send-to-codex: queue a teammate message for a Codex CLI session, then log it.
-# Wraps `codex queue` (checked against codex-cli 0.154.0). See ../README.md.
+# send-to-codex: queue a teammate message for a Codex CLI session, check that a turn takes it,
+# then log it. Wraps `codex queue` (checked against codex-cli 0.154.0). See ../README.md.
 set -euo pipefail
 
 usage() {
@@ -22,13 +22,25 @@ The message is sent with these two lines prepended:
   Teammate message from <sender> — not user approval
   Msg-ID: <fresh uuid, also written to the log as msg_id>
 
-Environment:
-  CODEX_BIN        codex executable (default: codex on PATH)
-  AGENT_COMMS_LOG  JSONL log file (default: <agent-comms>/log/messages.jsonl)
+Delivery: `codex queue` only stores the message, and the Codex daemon runs it
+only on a thread it has loaded. It unloads a thread about a minute after the
+thread goes idle with nobody attached. So before queueing, an unloaded agent
+that spawn-peer created is loaded again with the sandbox and approvals its
+spawn record holds. Other threads are never woken. After queueing, the tool
+waits until a turn takes the message and says what happened.
 
-Exit status: 0 when queued and logged; 2 on a usage error; codex's own
-non-zero status when `codex queue` fails; 1 when the send worked but the
-log line could not be written (the line is then printed to stderr).
+Environment:
+  CODEX_BIN                   codex executable (default: codex on PATH)
+  AGENT_COMMS_LOG             JSONL log file (default: <agent-comms>/log/messages.jsonl)
+  AGENT_COMMS_SPAWN_LOG       spawn record (default: <agent-comms>/log/spawned.jsonl)
+  CODEX_APP_SERVER_SOCK       Codex daemon socket
+  SEND_TO_CODEX_WAIT_SECONDS  how long to wait for a turn to take the message (default 10)
+
+Exit status: 0 when queued, taken by a turn (or held behind the turn the
+thread is running), and logged; 5 when queued and logged but no turn has
+taken it or will without help; 2 on a usage error; codex's own non-zero
+status when `codex queue` fails; 1 when the send worked but the log line
+could not be written (the line is then printed to stderr).
 EOF
 }
 
@@ -82,17 +94,28 @@ if ((dry_run)); then
   printf ' %q' "${cmd[@]}"
   printf '\nLog file (on a real send): %s\n' "$log_file"
   printf 'Logged first line: %s\n' "$first_line"
+  echo "Delivery: would ask the daemon whether the thread is loaded, wake it if it is an unloaded agent"
+  echo "that spawn-peer created, and wait until a turn takes the message."
   printf -- '--- message as it would be queued ---\n%s\n--- end ---\n' "$full_message"
   command -v "$codex_bin" >/dev/null || printf 'warning: %s not found\n' "$codex_bin" >&2
   exit 0
 fi
 
 # Check everything needed for logging before sending, so a send is never unlogged.
-for tool in "$codex_bin" jq flock; do
+for tool in "$codex_bin" jq flock python3; do
   command -v "$tool" >/dev/null || { printf 'send-to-codex: not found: %s\n' "$tool" >&2; exit 127; }
 done
 mkdir -p -- "$(dirname -- "$log_file")"
 touch -- "$log_file"
+
+delivery_py=$project_dir/lib/codex_delivery.py
+wait_seconds=${SEND_TO_CODEX_WAIT_SECONDS:-10}
+# Ask before queueing: an agent the daemon unloaded must be loaded again, or no turn takes the message.
+prepared=$(python3 "$delivery_py" prepare "$thread" 2>/dev/null) || prepared='{"error": "the delivery check failed"}'
+jq -e 'type == "object"' >/dev/null 2>&1 <<<"$prepared" || prepared='{"error": "the delivery check failed"}'
+thread_status=$(jq -r '.thread_status // ""' <<<"$prepared")
+woke=$(jq -r 'if .woke then 1 else 0 end' <<<"$prepared")
+delivery_note=$(jq -r '.note // .error // ""' <<<"$prepared")
 
 time_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 set +e
@@ -119,16 +142,38 @@ else
   error=${error:0:300}
 fi
 
+# Ask after queueing: did a turn take the message? No answer is never taken for a yes.
+delivery=""
+if [[ $result == queued ]]; then
+  delivery=unknown
+  if [[ -n $queued_id && -n $thread_uuid ]]; then
+    confirmed=$(python3 "$delivery_py" confirm "$thread_uuid" "$queued_id" "$woke" "$wait_seconds" "Msg-ID: ${msg_id}" 2>/dev/null) || confirmed='{}'
+    if jq -e '.delivery | type == "string"' >/dev/null 2>&1 <<<"$confirmed"; then
+      delivery=$(jq -r '.delivery' <<<"$confirmed")
+      woke=$(jq -r 'if .woke then 1 else 0 end' <<<"$confirmed")
+      delivery_note=$(jq -r '.note // ""' <<<"$confirmed")
+    else
+      delivery_note=$(jq -r '.error // "the delivery check failed"' <<<"$confirmed" 2>/dev/null || echo "the delivery check failed")
+    fi
+  else
+    delivery_note="codex did not print the queued id and thread, so a turn cannot be confirmed"
+  fi
+fi
+
 line=$(jq -cn \
   --arg time_utc "$time_utc" --arg sender "$sender" --arg thread "$thread" \
   --arg thread_uuid "$thread_uuid" --arg first_line "$first_line" \
   --arg result "$result" --arg queued_id "$queued_id" --arg error "$error" --arg msg_id "$msg_id" \
+  --arg thread_status "$thread_status" --argjson woke "$woke" \
+  --arg delivery "$delivery" --arg delivery_note "$delivery_note" \
   --argjson exit_code "$status" \
   'def n: if . == "" then null else . end;
    {time_utc: $time_utc, channel: "codex queue", sender: $sender,
     thread: $thread, thread_uuid: ($thread_uuid | n), first_line: $first_line,
     result: $result, queued_id: ($queued_id | n), msg_id: $msg_id,
-    error: ($error | n), exit_code: $exit_code}')
+    error: ($error | n), exit_code: $exit_code,
+    thread_status: ($thread_status | n), woke: ($woke == 1),
+    delivery: ($delivery | n), delivery_note: ($delivery_note | n)}')
 
 # Append one line under an exclusive lock on the log's file descriptor, then sync.
 log_ok=1
@@ -144,3 +189,21 @@ fi
 ((status == 0)) || exit "$status"
 ((log_ok)) || exit 1
 printf 'Logged to %s\n' "$log_file"
+
+((woke)) && echo "Woke the agent first: the Codex daemon had unloaded it."
+case $delivery in
+  started) echo "Delivered: a turn took the message." ;;
+  waiting) echo "Held: the agent is running a turn and takes the message when that turn ends." ;;
+  not-loaded)
+    printf 'send-to-codex: queued, but the thread is not loaded, so no turn starts until someone opens it (codex resume %s). Not woken: %s.\n' \
+      "$thread_uuid" "${delivery_note:-unknown reason}" >&2
+    exit 5 ;;
+  stuck)
+    printf 'send-to-codex: queued, but no turn took it within %s s (%s). Check bin/codex-reply %s before sending again.\n' \
+      "$wait_seconds" "$delivery_note" "$thread_uuid" >&2
+    exit 5 ;;
+  *)
+    printf 'send-to-codex: queued, but whether a turn takes it could not be checked (%s). Check bin/codex-reply %s.\n' \
+      "${delivery_note:-no answer}" "${thread_uuid:-$thread}" >&2
+    exit 5 ;;
+esac

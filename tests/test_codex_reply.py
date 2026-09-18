@@ -46,7 +46,7 @@ class CodexReplyTest(unittest.TestCase):
     def test_it_only_reads(self):
         self.set_turns([{"status": "completed", "items": [{"type": "agentMessage", "text": "hi"}]}])
         self.run_tool(THREAD_ID)
-        self.assertEqual(self.daemon.methods(), ["initialize", "initialized", "thread/read"])
+        self.assertEqual(self.daemon.methods(), ["initialize", "initialized", "thread/read", "thread/queue/list"])
 
     def test_running_turn_exits_5_and_shows_what_exists(self):
         self.set_turns([{"status": {"type": "inProgress"},
@@ -54,6 +54,33 @@ class CodexReplyTest(unittest.TestCase):
         proc = self.run_tool(THREAD_ID)
         self.assertEqual(proc.returncode, 5)
         self.assertIn("still going", proc.stdout)
+
+    def test_a_message_no_turn_has_taken_is_never_shown_as_done(self):
+        # What the stuck peers looked like: an old completed turn, and the new request still queued.
+        self.set_turns([{"status": "completed", "items": [{"type": "agentMessage", "text": "old answer"}]}])
+        self.daemon.status[THREAD_ID] = "notLoaded"
+        self.daemon.queue[THREAD_ID] = [{"id": "q-1", "clientUserMessageId": "c-1", "input": []}]
+        proc = self.run_tool(THREAD_ID)
+        self.assertEqual(proc.returncode, 6, proc.stderr)
+        self.assertIn("old answer", proc.stdout)
+        self.assertIn("1 queued message", proc.stderr)
+        self.assertIn("not loaded", proc.stderr)
+        self.assertNotIn("thread/resume", self.daemon.methods())  # it reports; it does not wake
+
+    def test_an_unreadable_queue_does_not_hide_the_answer(self):
+        self.set_turns([{"status": "completed", "items": [{"type": "agentMessage", "text": "hi"}]}])
+        self.daemon.fail.add("thread/queue/list")
+        proc = self.run_tool(THREAD_ID)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("could not read", proc.stderr)
+
+    def test_an_archived_thread_is_answered_quietly(self):
+        # The daemon refuses to list an archived thread's queue. Such a thread takes no messages at all.
+        self.set_turns([{"status": "completed", "items": [{"type": "agentMessage", "text": "hi"}]}])
+        self.daemon.archived.add(THREAD_ID)
+        proc = self.run_tool(THREAD_ID)
+        self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+        self.assertIn("archived", proc.stdout)
 
     def test_no_turn_yet_exits_3(self):
         self.set_turns([])

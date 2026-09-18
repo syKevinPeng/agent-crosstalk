@@ -15,6 +15,7 @@ import subprocess
 
 import agent_state
 import auth_readers
+import codex_delivery
 from codex_ws import CodexError, CodexWS
 import menu_detail
 from sources import claude_src, tmux_src
@@ -94,6 +95,17 @@ def _same_pane(agent):
     return now
 
 
+# How long a Send to a Codex agent with no pane waits for a turn to take the text. The popup waits too.
+DELIVERY_WAIT = 3.0
+DELIVERY_NOTES = {
+    "started": "queued, and a turn took it",
+    "waiting": "queued: it takes it when its current turn ends",
+    "not-loaded": "queued, but it is not loaded, so nothing runs it until it is opened. Not woken: {note}",
+    "stuck": "queued, but no turn took it yet. Check its latest answer before sending again",
+    "unknown": "queued, but whether a turn takes it could not be checked ({note})",
+}
+
+
 def instruct(agent, text):
     """Deliver the owner's words as the owner's own input. Never as a teammate message."""
     text = text.strip()
@@ -136,6 +148,12 @@ def instruct(agent, text):
         return "typed into its pane"
     if agent.kind == "codex":
         _attempt(agent, "instruct", instruction=text)
+        # `codex queue` only stores the text. The daemon runs it only on a loaded thread, so an agent
+        # it unloaded is woken first, the same way and with the same limits as bin/send-to-codex.
+        try:
+            woke = codex_delivery.prepare(agent.session_id)["woke"]
+        except CodexError:
+            woke = False
         binary = os.environ.get("CODEX_BIN") or "codex"
         try:
             done = subprocess.run([binary, "queue", "--thread", agent.session_id, "--message", text],
@@ -146,8 +164,16 @@ def instruct(agent, text):
         if done.returncode != 0:
             _result(agent, "instruct", "error", error=done.stderr.strip()[-200:])
             raise Refused("codex queue failed")
-        _result(agent, "instruct", "queued")
-        return "queued for it"
+        found = re.search(r"Queued message (\S+) for thread (\S+?)\.?\s*$", done.stdout.strip())
+        outcome = {"delivery": "unknown", "woke": woke, "note": "codex did not print the queued id"}
+        if found:
+            try:
+                outcome = codex_delivery.confirm(found.group(2), found.group(1), woke=woke, wait=DELIVERY_WAIT,
+                                                 marker=text)
+            except CodexError as exc:
+                outcome = {"delivery": "unknown", "woke": woke, "note": str(exc)}
+        _result(agent, "instruct", "queued", **outcome)
+        return DELIVERY_NOTES[outcome["delivery"]].format(note=outcome.get("note") or "no reason given")
     raise Refused("a Claude session with no pane takes input only in its own terminal. Use Attach")
 
 

@@ -17,14 +17,10 @@ import spawn_log  # noqa: E402
 from codex_ws import CodexError, CodexWS  # noqa: E402
 
 EXIT_LOG, EXIT_USAGE, EXIT_REFUSED, EXIT_FAILED = 1, 2, 3, 4
-CODEX_SANDBOX = {"read-only": "read-only", "write": "workspace-write"}
-CLAUDE_MODE = {"read-only": "plan", "write": "acceptEdits"}
-# How a Codex agent's approval requests are answered while nobody is attached.
+# How a Codex agent's approval requests are answered while nobody is attached, and its sandbox.
 # The project default is Codex's automatic reviewer. `never` refuses every request instead.
-CODEX_APPROVALS = {
-    "auto-review": {"approvalPolicy": "on-request", "approvalsReviewer": "auto_review"},
-    "never": {"approvalPolicy": "never"},
-}
+CODEX_SANDBOX, CODEX_APPROVALS = spawn_log.CODEX_SANDBOX, spawn_log.CODEX_APPROVALS
+CLAUDE_MODE = {"read-only": "plan", "write": "acceptEdits"}
 DEFAULT_APPROVALS = "auto-review"
 # Claude has no sandbox. Read-only is plan mode plus removal of every tool that can change files.
 CLAUDE_READ_ONLY_DENY = "Edit Write NotebookEdit Bash"
@@ -220,6 +216,10 @@ def main(argv):
     if args.kind == "codex" and (args.message or "").strip():
         sent = subprocess.run([os.path.join(BIN, "send-to-codex"), made["id"], args.sender, "-"],
                               input=args.message, text=True)
+        if sent.returncode == 5:  # send-to-codex: queued, but no turn has taken it
+            print("spawn-peer: the agent exists and is recorded, and the first message is queued, "
+                  "but no turn has taken it (see above)", file=sys.stderr)
+            return EXIT_FAILED
         if sent.returncode != 0:
             print("spawn-peer: the agent exists and is recorded, but the first message was not queued",
                   file=sys.stderr)

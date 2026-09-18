@@ -10,7 +10,7 @@ BIN = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(BIN), "lib"))
 from codex_ws import CodexError, CodexWS  # noqa: E402
 
-EXIT_USAGE, EXIT_NOT_FOUND, EXIT_FAILED, EXIT_NOT_DONE = 2, 3, 4, 5
+EXIT_USAGE, EXIT_NOT_FOUND, EXIT_FAILED, EXIT_NOT_DONE, EXIT_QUEUED = 2, 3, 4, 5, 6
 FINISHED = ("completed", "failed", "interrupted")
 
 
@@ -23,15 +23,25 @@ def main(argv):
     parser = argparse.ArgumentParser(
         prog="codex-reply", description="Print a Codex agent's messages from its latest turn. Changes nothing.",
         epilog="Exit status: 0 printed; 2 usage error; 3 no such thread, or it has no turn yet; "
-               "4 the daemon could not be reached; 5 the latest turn is still running (what exists is printed).")
+               "4 the daemon could not be reached; 5 the latest turn is still running (what exists is printed); "
+               "6 the latest turn finished, but a message is still queued and no turn has taken it, so the "
+               "printed answer is to an earlier message.")
     parser.add_argument("--all", action="store_true", help="include progress commentary, not only the final answer")
     parser.add_argument("thread", help="the Codex thread id, as printed by spawn-peer")
     args = parser.parse_args(argv)
 
+    queued, queue_error, archived = None, None, False
     try:
-        ws = CodexWS()
+        ws = CodexWS(experimental=True)
         try:
             thread = ws.rpc("thread/read", {"threadId": args.thread, "includeTurns": True}).get("thread")
+            # A queued message no turn has taken looks exactly like a slow agent, so look for one.
+            try:
+                queued = ws.rpc("thread/queue/list", {"threadId": args.thread}).get("data", [])
+            except CodexError as exc:
+                # The daemon keeps no queue for an archived thread, and such a thread takes no messages.
+                archived = "is archived" in str(exc)
+                queue_error = None if archived else str(exc)
         finally:
             ws.close()
     except CodexError as exc:
@@ -49,10 +59,23 @@ def main(argv):
     if not args.all:
         final = [m for m in messages if m.get("phase") == "final_answer"]
         messages = final or messages[-1:]
-    print(f"# thread {args.thread} ({thread.get('name') or 'unnamed'}), latest turn: {state}")
+    print(f"# thread {args.thread} ({thread.get('name') or 'unnamed'}{', archived' if archived else ''}), "
+          f"latest turn: {state}")
     for message in messages:
         print(message.get("text", ""))
-    return 0 if state in FINISHED else EXIT_NOT_DONE
+    if state not in FINISHED:
+        return EXIT_NOT_DONE
+    if queue_error:
+        print(f"codex-reply: could not read the thread's queue ({queue_error}), so a waiting message "
+              "would not show here", file=sys.stderr)
+    if queued:
+        loaded = status_of(thread)
+        why = ("the thread is not loaded, so no turn starts until it is opened. bin/send-to-codex wakes an "
+               "agent that spawn-peer created" if loaded == "notLoaded" else f"the thread is {loaded or 'unknown'}")
+        print(f"codex-reply: {len(queued)} queued message{'s' if len(queued) > 1 else ''} no turn has taken yet: "
+              f"the answer above is to an earlier message. {why}.", file=sys.stderr)
+        return EXIT_QUEUED
+    return 0
 
 
 if __name__ == "__main__":

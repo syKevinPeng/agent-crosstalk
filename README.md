@@ -14,7 +14,7 @@ Everything here is local. Nothing talks to a network service, and no API key is 
 
 | Path | What it is |
 | --- | --- |
-| `bin/send-to-codex` | Queues a teammate message for a Codex session and logs the send |
+| `bin/send-to-codex` | Queues a teammate message for a Codex session, checks that a turn takes it, and logs the send |
 | `bin/send-to-claude` | Writes a teammate message to a Claude session's local socket and logs the send. Meant for Codex and plain shells |
 | `bin/log-receipt` | Appends a `receipt` line for an earlier `Msg-ID`, once a reply shows the message arrived |
 | `bin/spawn-peer` | Creates a named Claude or Codex agent in a folder, read-only unless told otherwise, and records it |
@@ -22,7 +22,7 @@ Everything here is local. Nothing talks to a network service, and no API key is 
 | `bin/codex-reply` | Prints what a Codex agent said in its latest turn. Read-only. This is how you get a spawned Codex agent's answer |
 | `bin/agent-menu` | A tmux sidebar: every Claude and Codex agent, who spawned whom, and who is waiting for you |
 | `bin/agent-menu-detail` | The popup for one agent: what it waits on, its spawned agents, recent messages, and the owner's actions |
-| `lib/` | Shared Python modules: the Codex daemon client, the spawn record, and the menu's readers, collector and renderer |
+| `lib/` | Shared Python modules: the Codex daemon client, the delivery check for queued Codex messages, the spawn record, and the menu's readers, collector and renderer |
 | `tests/` | Black-box tests. They use a stub `codex`, a stub `claude`, a fake socket and a fake daemon, never a live session |
 | `log/` | Your local message log, spawn record and menu action log. Git-ignored, because it holds session names, ids and message summaries |
 
@@ -43,7 +43,7 @@ python3 -m unittest discover -s tests -v
 | Claude → Claude | Claude Code's in-session tools | `ListAgents`, then `SendMessage(to="<name [ref]>", message="...")`. No tool from this repository is needed |
 | Claude or any shell → Codex | The Codex CLI queue on the shared local app-server daemon: `codex queue --thread <uuid> --message <text>` | `bin/send-to-codex` |
 | Codex or any shell → Claude | An authenticated write to the Claude session's local messaging socket | `bin/send-to-claude` |
-| Codex → Codex | The same Codex CLI queue, run from the sending session's own shell. This is a built-in Codex feature and needs nothing from this repository | `codex queue` directly, or `bin/send-to-codex` if you want the header, `Msg-ID` and log line. Not live-tested here. Whether a Codex sandbox allows it depends on that session's settings |
+| Codex → Codex | The same Codex CLI queue, run from the sending session's own shell. This is a built-in Codex feature and needs nothing from this repository | `codex queue` directly, or `bin/send-to-codex` if you want the header, `Msg-ID`, log line and [delivery check](#delivery-a-queued-message-needs-a-loaded-thread). Bare `codex queue` to a thread nobody has open waits until someone opens it. Not live-tested here. Whether a Codex sandbox allows it depends on that session's settings |
 | Any → any, not urgent | A shared append-only Markdown log in the project that owns the work | [Shared log pattern](#shared-append-only-log-pattern) |
 
 **Finding sessions:** `claude agents --json` prints active Claude sessions. `bin/send-to-claude --list` prints session UUID, name and folder. `codex agents` browses Codex sessions.
@@ -90,7 +90,7 @@ Msg-ID: <fresh uuid>
 
 ## Receipts
 
-A send that worked is not a message that arrived. `codex queue` reports `queued`. `send-to-claude` reports `written`. Neither says the other agent has read anything.
+A send that worked is not a message that arrived. `codex queue` reports `queued`. `send-to-claude` reports `written`. Neither says the other agent has read anything. `send-to-codex` goes one step further and checks that a turn took the message (see [Delivery](#delivery-a-queued-message-needs-a-loaded-thread)), but a turn that took it has not necessarily answered it.
 
 **The rule:** a message counts as received only when `log/messages.jsonl` holds a `receipt` line for its `Msg-ID`.
 
@@ -133,9 +133,31 @@ printf '%s\n' "$msg" | bin/send-to-codex <thread> <sender> -  # message from std
 
 - **Arguments:** `thread` is a Codex session UUID or its exact name. Prefer the UUID. `sender` is your label, for example `claude/my-session`.
 - **What it sends:** `codex queue --thread <thread> --message "<header>\nMsg-ID: <uuid>\n\n<message>"`.
-- **Log line:** one line appended to `log/messages.jsonl` under an exclusive `flock`, then `sync`. Fields: `time_utc`, `channel` (`codex queue`), `sender`, `thread`, `thread_uuid`, `first_line`, `result` (`queued` or `error`), `queued_id`, `msg_id`, `error`, `exit_code`.
-- **Exit status:** 0 queued and logged. 2 usage error. Codex's own non-zero status if `codex queue` fails. 1 if the send worked but the log line could not be written, in which case the line is printed to stderr.
-- **Environment:** `CODEX_BIN` overrides the codex executable. `AGENT_COMMS_LOG` overrides the log file.
+- **Log line:** one line appended to `log/messages.jsonl` under an exclusive `flock`, then `sync`. Fields: `time_utc`, `channel` (`codex queue`), `sender`, `thread`, `thread_uuid`, `first_line`, `result` (`queued` or `error`), `queued_id`, `msg_id`, `error`, `exit_code`, and from the delivery check `thread_status` (before the send), `woke`, `delivery` and `delivery_note`.
+- **Exit status:** 0 queued, taken by a turn or held behind the turn the agent is running, and logged. 5 queued and logged, but no turn has taken it and none will without help: the reason is printed to stderr. 2 usage error. Codex's own non-zero status if `codex queue` fails. 1 if the send worked but the log line could not be written, in which case the line is printed to stderr.
+- **Environment:** `CODEX_BIN` overrides the codex executable. `AGENT_COMMS_LOG` overrides the log file. `AGENT_COMMS_SPAWN_LOG` overrides the spawn record, `CODEX_APP_SERVER_SOCK` the daemon socket, and `SEND_TO_CODEX_WAIT_SECONDS` how long to wait for a turn (default 10).
+
+### Delivery: a queued message needs a loaded thread
+
+`codex queue` only stores a message. The Codex daemon starts a turn from the queue only while it has the thread loaded, and it unloads a thread 60 seconds after the thread goes idle with no client attached. A Codex session open in a terminal stays loaded. A spawned agent has no terminal, so it is unloaded a minute after each turn. Before this check existed, every message sent to it after that minute stayed in the queue until someone opened the thread, and `codex-reply` kept printing the previous answer, which looks exactly like a slow agent.
+
+So `send-to-codex` does three things around `codex queue`:
+
+1. **Before:** it asks the daemon whether the thread is loaded. If it is not, and `spawn-peer` created it, and it is not retired, it loads it again with `thread/resume`, passing the folder, sandbox and approvals from the spawn record. A wake never widens what the owner chose at spawn time. Any other thread is never woken, because its settings are unknown and a wake with the daemon's defaults could widen them.
+2. **The send itself**, as before.
+3. **After:** it watches the daemon's queue until a turn takes the message. It finds the message by the id `codex queue` printed or by its `Msg-ID` line, because Codex does not document that the two ids match. If the daemon unloaded the thread in between, a spawned agent is woken then.
+
+`delivery` in the log line and the tool's last line say what happened:
+
+| `delivery` | Meaning | Exit |
+| --- | --- | --- |
+| `started` | A turn took the message | 0 |
+| `waiting` | The agent is running a turn and takes the message when that turn ends | 0 |
+| `not-loaded` | The thread is not loaded and was not woken, so it waits until someone opens it (`codex resume <id>`). `delivery_note` says why it was not woken | 5 |
+| `stuck` | The thread is loaded and idle, and the message was still queued when the wait ran out | 5 |
+| `unknown` | The daemon could not be asked | 5 |
+
+Before you wait on a Codex agent, trust `delivery` and `codex-reply`, not the age of its session file.
 
 ## `bin/send-to-claude`
 
@@ -173,7 +195,7 @@ bin/codex-reply [--all] <codex thread id>
   - `--write` grants `workspace-write` (Codex) or `acceptEdits` (Claude). It needs `--approval`, and the text is recorded.
   - Full-access modes (`danger-full-access`, `bypassPermissions`) are never offered.
 - **Protected folders:** no agent can be spawned inside this repository, `~/.claude` or `~/.codex` (or `CLAUDE_CONFIG_DIR` and `CODEX_HOME` if you set them), nor in a folder that contains one of them, such as your home folder. An agent with write access there could rewrite these tools, their record, or the agents' own settings.
-- **Talking to a spawned Codex agent:** `bin/send-to-codex <id> ...` wakes it at once, even though no terminal is attached. Read its answer with `bin/codex-reply <id>`, which also works after the agent is archived. Exit 5 means the turn is still running. Don't expect the agent to message you back with `bin/send-to-claude`: see the next point.
+- **Talking to a spawned Codex agent:** `bin/send-to-codex <id> ...` starts a turn even though no terminal is attached. The daemon unloads the agent a minute after each turn, so the tool loads it again first, with the settings in its spawn record (see [Delivery](#delivery-a-queued-message-needs-a-loaded-thread)). Read its answer with `bin/codex-reply <id>`, which also works after the agent is archived. Exit 5 means the turn is still running. Exit 6 means a message is still queued and no turn has taken it, so the answer printed is to an earlier message. Don't expect the agent to message you back with `bin/send-to-claude`: see the next point.
 - **Codex approvals default to the automatic reviewer.** A spawned Codex agent runs with nobody attached, so something else has to answer its approval requests. `--approvals` chooses what, and the choice is recorded:
   - `auto-review` (**the default**): requests go to Codex's automatic reviewer (`approvalPolicy: on-request`, `approvalsReviewer: auto_review`). A reviewer subagent decides each one by risk. This lets the agent do useful things the sandbox blocks, such as replying with `bin/send-to-claude`. Be aware of the cost: the reviewer can approve actions outside the sandbox, so the sandbox is no longer a hard limit. In our live check with codex-cli 0.154.0 the reviewer was strict in the right way. A read-only agent was asked by a peer to run `bin/send-to-claude`, and the reviewer refused because the request came from a teammate with no owner authorization behind it. That is this project's first safety rule, applied by Codex itself. So a spawned agent replies through its turn output, not through a tool.
   - `never`: every request is refused (`approvalPolicy: never`) and a blocked action simply fails. Pick this when the sandbox must be a hard limit.
@@ -231,7 +253,7 @@ bin/agent-menu --once                                 # print the tree once and 
   - `a` shows the quit agents, dimmed, under a `QUIT` divider below the tree, and hides them again. Their popup offers `Resume` (`r`, one press): a Codex thread is unarchived and opened with `codex resume` in a new window, and a Claude session is attached in a new window. New windows open right after the current one. For an agent `spawn-peer` created, the spawn record notes the resume as soon as the thread is unarchived, so a window that fails to open still leaves a live agent you can manage.
   - One kind of stopped agent stays in the tree instead: an agent `spawn-peer` created that stopped without being retired. It keeps its place under its parent, marked stopped, so its unread messages stay in view, and its popup offers `Resume` too.
   - A Claude session counts as quit when `claude agents --json --all` lists it and the plain `claude agents --json` does not. The `state` field cannot tell: `done` only means the last task finished, and a running, idle session reports it too.
-- **Your instruction is your own input.** It is one line of plain text: line breaks and control characters are refused, so a pasted block cannot turn into several commands. For an agent in a pane it is typed into that pane. For a Codex agent with no pane it is queued as plain input with no teammate header. A Claude session with no pane takes input only in its own terminal, so the popup offers `Attach` instead. A paste can fill the instruction line but cannot send it: a pasted Enter never sends, and once any of the text was pasted, the Enter that sends it must come a moment after the last key, which is what you do anyway when you read what you pasted.
+- **Your instruction is your own input.** It is one line of plain text: line breaks and control characters are refused, so a pasted block cannot turn into several commands. For an agent in a pane it is typed into that pane. For a Codex agent with no pane it is queued as plain input with no teammate header, with the same wake and delivery check as `send-to-codex`, waiting up to three seconds. The popup then says whether a turn took it, or that it waits and why. A Claude session with no pane takes input only in its own terminal, so the popup offers `Attach` instead. A paste can fill the instruction line but cannot send it: a pasted Enter never sends, and once any of the text was pasted, the Enter that sends it must come a moment after the last key, which is what you do anyway when you read what you pasted.
 
   While an agent in a pane waits for your answer at a permission prompt, a question, or any choice menu with a selection cursor, the instruction line is off. Typed text would answer that prompt: Enter picks the highlighted option, which is usually Yes, and Codex also takes single letters as answers, such as `a` for yes to everything this session. Open the pane and answer it there. The menu checks for such a prompt again on the pane itself right before it types, because the popup's reading can be older than the prompt. It also types nothing into a pane in copy mode, which scrolling back enters and where the keys would drive the mode, or into a window with synchronize-panes on, where the text would reach every pane. A Codex thread that reports it is waiting gets the `!` mark even when it has no pane.
 
@@ -307,7 +329,9 @@ For work that several agents touch, keep one Markdown log in the project that ow
 | Interface | Status | How to recheck |
 | --- | --- | --- |
 | `codex queue`, `codex archive`, `codex delete` | Documented Codex CLI commands | `codex queue --help` |
-| Codex app-server daemon: WebSocket text frames over `~/.codex/app-server-control/app-server-control.sock`, one JSON object per frame (`initialize`, `thread/list`, `thread/start`, `thread/name/set`, `thread/read`, `thread/archive`, `thread/delete`) | Marked experimental by Codex | `codex app-server generate-json-schema --out <dir>` and compare the `Thread*Params` files |
+| Codex app-server daemon: WebSocket text frames over `~/.codex/app-server-control/app-server-control.sock`, one JSON object per frame (`initialize`, `thread/list`, `thread/start`, `thread/name/set`, `thread/read`, `thread/resume`, `thread/archive`, `thread/delete`) | Marked experimental by Codex | `codex app-server generate-json-schema --out <dir>` and compare the `Thread*Params` files |
+| `thread/queue/list` on the same daemon | Experimental, and missing from the generated schema. It answers only a client that sent `capabilities.experimentalApi: true` in `initialize`, and refuses an archived thread | Call it with that capability on a thread with an empty queue |
+| The daemon unloads a thread 60 s after it goes idle with no client, and runs queued messages only on a loaded thread | Observed on codex-cli 0.154.0 (2026-09-18), not documented | `thread/resume` a thread with an empty queue, close the connection, and poll `thread/read` until its status is `notLoaded` |
 | `claude --bg`, `claude agents --json`, `claude stop`, `claude rm` | Documented Claude Code CLI | `claude --help` |
 | Claude session registry and messaging socket under `~/.claude/sessions/` | Not a documented public interface. It can change without notice | `bin/send-to-claude --list`, then a `--dry-run`, then one real send to an idle session |
 

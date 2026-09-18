@@ -29,6 +29,12 @@ class FakeCodexDaemon:
         self.calls = []
         self.archived = set()
         self.fail = set(fail)
+        # The queue, as the real daemon runs it: a queued message starts a turn only on a thread that
+        # is loaded and idle. `status` holds notLoaded / idle / active for the threads a test sets.
+        self.status, self.queue, self.taken = {}, {}, []
+        self.stall = False  # when True, even an idle loaded thread leaves its queue alone
+        self.list_other_ids = False  # when True, the queue lists an id other than the one `queue/add` gave
+        self._queued = 0
         self.threads = {f"old-{i}": {"id": f"old-{i}", "name": n, "cwd": "/x"}
                         for i, n in enumerate(existing_names)}
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -54,7 +60,38 @@ class FakeCodexDaemon:
             buf += chunk
         return buf
 
-    def _answer(self, method, params):
+    def _drain(self, tid):
+        if not self.stall and self.status.get(tid) == "idle" and self.queue.get(tid):
+            self.taken += [item["id"] for item in self.queue.pop(tid)]
+            self.status[tid] = "active"
+
+    def queued_ids(self):
+        return {tid: [item["id"] for item in items] for tid, items in self.queue.items() if items}
+
+    def _answer(self, method, params, experimental=False):
+        if method.startswith("thread/queue/") and not experimental:
+            raise LookupError(f"{method} requires experimentalApi capability")
+        if method.startswith("thread/queue/") and params.get("threadId") in self.archived:
+            raise LookupError(f"session {params['threadId']} is archived. Run `codex unarchive` to unarchive it first.")
+        if method == "thread/queue/add":
+            self._queued += 1
+            item = {"id": f"q-{self._queued}", "clientUserMessageId": f"c-{self._queued}",
+                    "input": params.get("input") or []}
+            self.queue.setdefault(params["threadId"], []).append(item)
+            self._drain(params["threadId"])
+            return {"id": item["id"]}
+        if method == "thread/queue/list":
+            items = self.queue.get(params["threadId"], [])
+            if self.list_other_ids:
+                items = [dict(i, id="other-" + i["id"], clientUserMessageId="other") for i in items]
+            return {"data": items, "nextCursor": None}
+        if method == "thread/resume":
+            tid = params["threadId"]
+            if self.status.get(tid, "notLoaded") == "notLoaded":
+                self.status[tid] = "idle"
+            self._drain(tid)
+            return {"thread": self.threads.get(tid), "sandbox": params.get("sandbox"),
+                    "approvalPolicy": params.get("approvalPolicy")}
         if method == "account/rateLimits/read":
             return getattr(self, "account", {})
         if method == "thread/list":
@@ -73,7 +110,10 @@ class FakeCodexDaemon:
         if method == "thread/name/set":
             self.threads[params["threadId"]]["name"] = params["name"]
         if method == "thread/read":
-            return {"thread": self.threads.get(params["threadId"])}
+            thread = self.threads.get(params["threadId"])
+            if thread is not None and params["threadId"] in self.status:
+                thread = dict(thread, status={"type": self.status[params["threadId"]]})
+            return {"thread": thread}
         return {}
 
     def _serve(self, conn):
@@ -86,6 +126,7 @@ class FakeCodexDaemon:
             accept = base64.b64encode(hashlib.sha1(key + WS_GUID.encode()).digest())
             conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
                          b"Connection: Upgrade\r\nSec-WebSocket-Accept: " + accept + b"\r\n\r\n")
+            experimental = False
             while True:
                 b0, b1 = self._take(conn, 2)
                 n = b1 & 0x7F
@@ -101,10 +142,16 @@ class FakeCodexDaemon:
                 self.calls.append((msg.get("method"), msg.get("params")))
                 if "id" not in msg:
                     continue
+                if msg["method"] == "initialize":
+                    experimental = bool(((msg.get("params") or {}).get("capabilities") or {}).get("experimentalApi"))
                 if msg["method"] in self.fail:
                     body = {"id": msg["id"], "error": {"code": -1, "message": "refused by fake"}}
                 else:
-                    body = {"id": msg["id"], "result": self._answer(msg["method"], msg.get("params") or {})}
+                    try:
+                        body = {"id": msg["id"], "result": self._answer(msg["method"], msg.get("params") or {},
+                                                                        experimental)}
+                    except LookupError as exc:
+                        body = {"id": msg["id"], "error": {"code": -32600, "message": str(exc)}}
                 out = json.dumps(body).encode()
                 head = bytes([0x81, len(out)]) if len(out) < 126 else bytes([0x81, 126]) + struct.pack(">H", len(out))
                 conn.sendall(head + out)

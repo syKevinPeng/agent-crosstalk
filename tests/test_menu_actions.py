@@ -177,9 +177,46 @@ class MenuActionsTest(unittest.TestCase):
         stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
         headless = agent_state.Agent(key="codex:t2", kind="codex", name="quiet", session_id="t2")
         with mock.patch.dict(os.environ, {"CODEX_BIN": str(stub)}):
-            self.assertEqual(menu_actions.instruct(headless, "Please retry the push"), "queued for it")
+            note = menu_actions.instruct(headless, "Please retry the push")
         self.assertEqual(argv_file.read_text().splitlines(), ["queue", "--thread", "t2", "--message", "Please retry the push"])
-        self.assertEqual([a["result"] for a in self.m.actions()], ["attempt", "queued"])
+        # No daemon answers here, so the menu may not claim the agent got it.
+        self.assertTrue(note.startswith("queued, but"), note)
+        self.assertEqual([(a["result"], a.get("delivery")) for a in self.m.actions()],
+                         [("attempt", None), ("queued", "unknown")])
+
+    def headless_codex(self, status, spawned):
+        """A Codex agent with no pane, on a fake daemon whose queue behaves like the real one."""
+        from test_send_to_codex import QUEUEING_STUB
+        daemon = FakeCodexDaemon(self.m.sock)
+        daemon.threads[THREAD] = {"id": THREAD, "name": "quiet", "cwd": "/w"}
+        daemon.status[THREAD] = status
+        if spawned:
+            self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "quiet", "id": THREAD,
+                                         "cwd": "/w", "access": "read-only", "approvals": "auto-review"})
+        stub = self.m.dir / "codex-stub"
+        stub.write_text(QUEUEING_STUB)
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+        agent = agent_state.Agent(key=f"codex:{THREAD}", kind="codex", name="quiet", session_id=THREAD,
+                                  spawned=spawned)
+        return daemon, agent
+
+    def test_a_headless_spawned_codex_the_daemon_unloaded_is_woken_and_takes_the_instruction(self):
+        daemon, agent = self.headless_codex("notLoaded", spawned=True)
+        self.assertEqual(menu_actions.instruct(agent, "Please retry the push"), "queued, and a turn took it")
+        self.assertEqual(daemon.taken, ["q-1"])
+        (params,) = daemon.params("thread/resume")
+        self.assertEqual((params["sandbox"], params["approvalPolicy"]), ("read-only", "on-request"))
+        self.assertLess(daemon.methods().index("thread/resume"), daemon.methods().index("thread/queue/add"))
+        self.assertEqual(self.m.actions()[-1]["delivery"], "started")
+
+    def test_a_headless_codex_that_is_not_ours_is_never_woken_and_the_menu_says_it_waits(self):
+        daemon, agent = self.headless_codex("notLoaded", spawned=False)
+        note = menu_actions.instruct(agent, "Please retry the push")
+        self.assertIn("not loaded", note)
+        self.assertNotIn("thread/resume", daemon.methods())
+        self.assertEqual(daemon.queued_ids(), {THREAD: ["q-1"]})
+        daemon.list_other_ids = True  # found by its text too, not only by the printed id
+        self.assertIn("not loaded", menu_actions.instruct(agent, "A second instruction"))
 
     def test_attach_is_for_a_background_claude_with_no_pane_and_a_plain_id(self):
         def claude(**kw):

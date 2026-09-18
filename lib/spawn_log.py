@@ -4,6 +4,14 @@ import fcntl
 import json
 import os
 
+# What a spawn record's `access` and `approvals` mean to the Codex daemon. spawn-peer starts a thread
+# with these, and send-to-codex wakes an unloaded one with the same, so a wake never widens a spawn.
+CODEX_SANDBOX = {"read-only": "read-only", "write": "workspace-write"}
+CODEX_APPROVALS = {
+    "auto-review": {"approvalPolicy": "on-request", "approvalsReviewer": "auto_review"},
+    "never": {"approvalPolicy": "never"},
+}
+
 
 def path():
     here = os.path.dirname(os.path.realpath(__file__))
