@@ -85,7 +85,9 @@ def popup(command, width=100, height=26, title=""):
 
 
 def new_window(name, command):
-    _tmux("new-window", "-n", literal(name), command)
+    """Open right after the current window. Without -a tmux takes the first free number, which can
+    put the new window ahead of the one the owner works in and reorder their tabs."""
+    _tmux("new-window", "-a", "-n", literal(name), command)
 
 
 def alive(pid):

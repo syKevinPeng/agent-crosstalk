@@ -189,7 +189,7 @@ class MenuActionsTest(unittest.TestCase):
         self.assertEqual(self.acted(), [])
         self.assertEqual(menu_actions.attach(claude()), "opened in a new window")
         (call,) = self.acted()
-        self.assertTrue(call.startswith("new-window -n far; away ##(touch x) "), call)   # `#` is doubled for tmux
+        self.assertTrue(call.startswith("new-window -a -n far; away ##(touch x) "), call)  # after the current window; `#` doubled
         self.assertTrue(call.endswith(" attach abcdef12"), call)
 
     def test_only_a_live_spawned_agent_can_be_retired(self):
