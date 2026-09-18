@@ -112,6 +112,22 @@ def set_option(target, name, value=None, scope="p"):
         _tmux("set-option", f"-{scope}", "-t", target, name, value)
 
 
+def set_options(changes):
+    """Several set_option changes, (target, name, value or None, scope), in one tmux call, so tmux
+    redraws once rather than once per change. tmux runs them in order and stops at a failing one."""
+    argv = []
+    for target, name, value, scope in changes:
+        argv += [";"] if argv else []
+        if value is None:
+            argv += ["set-option", f"-{scope}", "-u", "-t", target, name]
+        else:
+            # An argument ending in ";" would end the command there. No value written here ends so,
+            # but a value saved from the owner could.
+            argv += ["set-option", f"-{scope}", "-t", target, name, value[:-1] + "\\;" if value.endswith(";") else value]
+    if argv:
+        _tmux(*argv)
+
+
 def window_of(pane_id):
     return _tmux("display-message", "-p", "-t", pane_id, "#{window_id}").strip()
 

@@ -17,8 +17,10 @@ import menu_highlight  # noqa: E402
 CLAUDE_A = "aaaaaaaa-0000-4000-8000-000000000001"
 TINT = {"window-style": "bg=colour236", "window-active-style": "bg=colour236"}
 # tmux 3.4 keeps border styles per window, so the window's styles depend on the pane's marker.
+# The active style falls back to tmux 3.4's own default, which is itself a format.
 BORDER = {"pane-border-style": "#{?#{@agent_menu_highlight},fg=brightcyan,default}",
-          "pane-active-border-style": "#{?#{@agent_menu_highlight},fg=brightcyan#,bold,default}"}
+          "pane-active-border-style": "#{?#{@agent_menu_highlight},fg=brightcyan#,bold,"
+                                      "#{?pane_in_mode,fg=yellow,#{?synchronize-panes,fg=red,fg=green}}}"}
 FOCUS = ("select-pane", "select-window", "switch-client")
 
 
@@ -74,7 +76,9 @@ class HighlightTest(unittest.TestCase):
         light.show("%8")                                                  # same window: borders stay
         self.assertEqual(self.borders()["pane-border-style"],
                          "#{?#{@agent_menu_highlight},fg=brightcyan,fg=blue#,bold}")
-        self.assertFalse([c for c in self.m.tmux_calls()[calls:] if c.startswith("set-option -w")])
+        moved = self.m.tmux_calls()[calls:]
+        self.assertFalse([c for c in moved if "set-option -w" in c])
+        self.assertEqual(len([c for c in moved if "set-option" in c]), 2)  # one call to mark, one to release
         self.assertEqual(self.m.pane_options(7), {"window-style": "bg=#101010"})
         self.assertEqual(self.tint(8), TINT)
         light.show(None)                                                  # an agent with no pane
@@ -165,14 +169,14 @@ class HighlightTest(unittest.TestCase):
 
     def test_an_exit_in_the_middle_of_a_highlight_still_undoes_it(self):
         light = menu_highlight.Highlighter()
-        real = menu_highlight.tmux_src.set_option
-        for stop_at in ("window-active-style", "pane-border-style", "pane-active-border-style"):
+        real = menu_highlight.tmux_src.set_options
+        for stop_at in ("window-style", "pane-border-style"):
             with self.subTest(stop_at=stop_at):
-                def interrupted(target, name, value=None, scope="p"):
-                    if name == stop_at and value:
-                        raise SystemExit(143)                    # SIGTERM arrives halfway through
-                    return real(target, name, value, scope)
-                with mock.patch.object(menu_highlight.tmux_src, "set_option", interrupted):
+                def interrupted(changes):
+                    if any(name == stop_at for _, name, _, _ in changes):
+                        raise SystemExit(143)                    # SIGTERM arrives before this tmux call
+                    return real(changes)
+                with mock.patch.object(menu_highlight.tmux_src, "set_options", interrupted):
                     with self.assertRaises(SystemExit):
                         light.show("%7")
                 light.clear()
@@ -185,6 +189,29 @@ class HighlightTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 light.show("%8")
         light.clear()
+        self.untouched()
+
+    def test_values_the_owner_sets_during_a_highlight_are_kept(self):
+        light = menu_highlight.Highlighter()
+        light.show("%7")
+        (self.m.dir / "popt-7-window-style").write_text("bg=blue")             # select-pane -P bg=blue
+        (self.m.dir / "wopt-1-pane-border-style").write_text("fg=red")         # setw pane-border-style fg=red
+        light.show(None)
+        self.assertEqual(self.m.pane_options(7), {"window-style": "bg=blue"})
+        self.assertEqual(self.m.window_options(1), {"pane-border-style": "fg=red"})
+
+    def test_a_value_tmux_refuses_is_tried_once_per_selection(self):
+        (self.m.dir / "reject-window-active-style").write_text("")
+        light = menu_highlight.Highlighter()
+        light.show("%7")
+        tried = len(self.m.tmux_calls())
+        for _ in range(5):                                                    # the sidebar ticks on
+            light.show("%7")
+        self.assertEqual(len(self.m.tmux_calls()), tried)
+        self.untouched()
+        light.show("%8")
+        light.show("%7")                                                      # moved away and back: tried again
+        self.assertGreater(len(self.m.tmux_calls()), tried)
         self.untouched()
 
     def test_a_pane_that_is_gone_is_no_error(self):

@@ -26,41 +26,59 @@ LIB = Path(os.environ.get("AGENT_COMMS_LIB") or ROOT / "lib")
 TMUX_STUB = r"""#!/usr/bin/env bash
 d="$STUB_DIR"; printf '%s\n' "$*" >> "$d/tmux-calls.txt"
 [[ -n ${STUB_TMUX_FAIL:-} ]] && { echo "no server running" >&2; exit 1; }
-target=""; args=("$@"); for ((i=0;i<${#args[@]};i++)); do [[ ${args[i]} == -t ]] && target=${args[i+1]}; done
 # Options are kept as files, as tmux 3.4 scopes them: popt-<pane number>-<name> on a pane, wopt-<window
 # number>-<name> on a window (window-N files say which window pane N is in, default @1), and gopt-<name>
-# for the global value a window inherits. Tests read a pane's and a window's end state from them.
-[[ -n $target && -f "$d/gone-${target#%}" ]] && { echo "can't find pane: $target" >&2; exit 1; }
+# for the global value a window inherits, else tmux 3.4's own default. Tests read end states from them.
+# A reject-<name> file makes tmux refuse any value for that option, as it refuses a bad colour.
+DEFAULT_ACTIVE='#{?pane_in_mode,fg=yellow,#{?synchronize-panes,fg=red,fg=green}}'
 win_of() { if [[ -f "$d/window-$1" ]]; then cat "$d/window-$1"; else echo "@1"; fi; }
-scope=p; inherited=0; unset_=0; pos=()
-for ((i=1;i<${#args[@]};i++)); do
-  case ${args[i]} in -p) scope=p ;; -w) scope=w ;; -A) inherited=1 ;; -u) unset_=1 ;; -q|-v|-a) ;;
-    -t|-F) i=$((i+1)) ;; *) pos+=("${args[i]}") ;; esac
+one() {
+  local target="" args=("$@") scope=p inherited=0 unset_=0 value_only=0 pos=() i file
+  for ((i=0;i<${#args[@]};i++)); do [[ ${args[i]} == -t ]] && target=${args[i+1]}; done
+  [[ -n $target && -f "$d/gone-${target#%}" ]] && { echo "can't find pane: $target" >&2; return 1; }
+  for ((i=1;i<${#args[@]};i++)); do
+    case ${args[i]} in -p) scope=p ;; -w) scope=w ;; -A) inherited=1 ;; -u) unset_=1 ;; -v) value_only=1 ;;
+      -q|-a) ;; -t|-F) i=$((i+1)) ;; *) pos+=("${args[i]}") ;; esac
+  done
+  if [[ $scope == w ]]; then file="$d/wopt-${target#@}-${pos[0]}"; else file="$d/popt-${target#%}-${pos[0]}"; fi
+  case $1 in
+    list-panes) if [[ " $* " == *"@agent_menu_highlight"* ]]; then
+                  for f in "$d"/popt-*-@agent_menu_highlight; do
+                    [[ -f $f ]] || continue
+                    n=${f#"$d/popt-"}; n=${n%%-@agent_menu_highlight}
+                    [[ -n $target && $(win_of "$n") != "$target" ]] && continue
+                    printf '%%%s\t%s\n' "$n" "$(cat "$f")"
+                  done
+                else cat "$d/panes.tsv"; fi ;;
+    list-windows) for f in "$d"/wopt-*-@agent_menu_highlight_window; do
+                    [[ -f $f ]] || continue
+                    n=${f#"$d/wopt-"}; printf '@%s\t%s\n' "${n%%-@agent_menu_highlight_window}" "$(cat "$f")"
+                  done ;;
+    capture-pane) cat "$d/screen-${target#%}.txt" 2>/dev/null ;;
+    display-message) if [[ " $* " == *"window_id"* ]]; then win_of "${target#%}"
+                     elif [[ -f "$d/pid-${target#%}.txt" ]]; then cat "$d/pid-${target#%}.txt"
+                     else echo "can't find pane" >&2; return 1; fi ;;
+    show-options) local value="" found=0
+                  if [[ -f $file ]]; then value=$(cat "$file"); found=1
+                  elif ((inherited)); then
+                    found=1
+                    if [[ -f "$d/gopt-${pos[0]}" ]]; then value=$(cat "$d/gopt-${pos[0]}")
+                    elif [[ ${pos[0]} == pane-active-border-style ]]; then value=$DEFAULT_ACTIVE
+                    else value=default; fi
+                  fi
+                  if ((found)); then if ((value_only)); then printf '%s\n' "$value"; else printf '%s %s\n' "${pos[0]}" "$value"; fi; fi ;;
+    set-option) if ((unset_)); then rm -f "$file"
+                elif [[ -f "$d/reject-${pos[0]}" ]]; then echo "bad value: ${pos[1]}" >&2; return 1
+                else printf '%s' "${pos[1]}" > "$file"; fi ;;
+    *) : ;;
+  esac
+}
+# Several commands joined by ";" run in order, and a failing one stops the rest, as in tmux.
+cmd=()
+for arg in "$@" ";"; do
+  if [[ $arg == ";" ]]; then ((${#cmd[@]})) && { one "${cmd[@]}" || exit 1; }; cmd=()
+  else cmd+=("$arg"); fi
 done
-if [[ $scope == w ]]; then file="$d/wopt-${target#@}-${pos[0]}"; else file="$d/popt-${target#%}-${pos[0]}"; fi
-case $1 in
-  list-panes) if [[ " $* " == *"@agent_menu_highlight"* ]]; then
-                for f in "$d"/popt-*-@agent_menu_highlight; do
-                  [[ -f $f ]] || continue
-                  n=${f#"$d/popt-"}; n=${n%%-@agent_menu_highlight}
-                  [[ -n $target && $(win_of "$n") != "$target" ]] && continue
-                  printf '%%%s\t%s\n' "$n" "$(cat "$f")"
-                done
-              else cat "$d/panes.tsv"; fi ;;
-  list-windows) for f in "$d"/wopt-*-@agent_menu_highlight_window; do
-                  [[ -f $f ]] || continue
-                  n=${f#"$d/wopt-"}; printf '@%s\t%s\n' "${n%%-@agent_menu_highlight_window}" "$(cat "$f")"
-                done ;;
-  capture-pane) cat "$d/screen-${target#%}.txt" 2>/dev/null ;;
-  display-message) if [[ " $* " == *"window_id"* ]]; then win_of "${target#%}"
-                   elif [[ -f "$d/pid-${target#%}.txt" ]]; then cat "$d/pid-${target#%}.txt"
-                   else echo "can't find pane" >&2; exit 1; fi ;;
-  show-options) if [[ -f $file ]]; then cat "$file"; echo
-                elif ((inherited)); then if [[ -f "$d/gopt-${pos[0]}" ]]; then cat "$d/gopt-${pos[0]}"; echo; else echo default; fi
-                fi ;;
-  set-option) if ((unset_)); then rm -f "$file"; else printf '%s' "${pos[1]}" > "$file"; fi ;;
-  *) : ;;
-esac
 """
 
 # Every external program the menu can run has a stub here. A test that forgets to set one must hit

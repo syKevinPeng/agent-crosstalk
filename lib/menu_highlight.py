@@ -8,7 +8,8 @@ Keyboard focus never moves, and everything is undone exactly.
   and every other pane looks as before. The window's own earlier values are saved in WINDOW_MARK and
   put back once none of its panes is marked.
 Saving happens before any change, so a later sidebar can undo what a killed one left. A pane or
-window without a marker is never touched."""
+window without a marker is never touched, and an option is put back only while it still holds what
+this module wrote: a value the owner sets during a highlight is theirs and stays."""
 import base64
 import json
 import os
@@ -20,6 +21,7 @@ from sources.base import SourceError
 
 MARK = "@agent_menu_highlight"
 WINDOW_MARK = "@agent_menu_highlight_window"
+COND_PREFIX = f"#{{?#{{{MARK}}},"                              # how a border style of ours starts
 TINTS = ("window-style", "window-active-style")               # pane options
 BORDERS = ("pane-border-style", "pane-active-border-style")   # window options
 DEFAULT_BG, DEFAULT_BORDER = "colour236", "brightcyan"
@@ -84,21 +86,22 @@ def _decode(value):
 
 
 def apply(pane_id):
-    """Save, then highlight the pane. Returns its window. Raises SourceError when tmux refuses."""
+    """Save, then highlight the pane. Returns its window. Raises SourceError when tmux refuses.
+    Each group of changes is one tmux call, marker first: tmux runs it whole even if this process dies
+    meanwhile, and stops at a refused change with the marker already set to undo by."""
     if tmux_src.option(pane_id, MARK):
         restore(pane_id)  # a killed sidebar's highlight: undo it first, or it would be saved as the original
     look = styles()
-    saved = {name: tmux_src.option(pane_id, name) or None for name in TINTS}
-    tmux_src.set_option(pane_id, MARK, _encode(saved))  # saved before any change, so a crash can be undone
-    for name in TINTS:
-        tmux_src.set_option(pane_id, name, look[name])
+    record = {"saved": {name: tmux_src.option(pane_id, name) or None for name in TINTS},
+              "wrote": {name: look[name] for name in TINTS}}
+    tmux_src.set_options([(pane_id, MARK, _encode(record), "p")] +
+                         [(pane_id, name, look[name], "p") for name in TINTS])
     window = tmux_src.window_of(pane_id)
     if not tmux_src.option(window, WINDOW_MARK, "w"):
-        saved = {name: tmux_src.option(window, name, "w") or None for name in BORDERS}
+        record = {"saved": {name: tmux_src.option(window, name, "w") or None for name in BORDERS}}
         before = {name: tmux_src.option(window, name, "w", inherited=True) for name in BORDERS}
-        tmux_src.set_option(window, WINDOW_MARK, _encode(saved), "w")
-        for name in BORDERS:
-            tmux_src.set_option(window, name, conditional(look[name], before[name]), "w")
+        tmux_src.set_options([(window, WINDOW_MARK, _encode(record), "w")] +
+                             [(window, name, conditional(look[name], before[name]), "w") for name in BORDERS])
     return window
 
 
@@ -108,10 +111,10 @@ def release(window):
         mark = tmux_src.option(window, WINDOW_MARK, "w")
         if not mark or tmux_src.panes_with_option(MARK, window):
             return
-        saved = _decode(mark)
-        for name in BORDERS:
-            tmux_src.set_option(window, name, saved.get(name), "w")
-        tmux_src.set_option(window, WINDOW_MARK, None, "w")
+        saved = _decode(mark).get("saved") or {}
+        tmux_src.set_options([(window, name, saved.get(name), "w") for name in BORDERS
+                              if tmux_src.option(window, name, "w").startswith(COND_PREFIX)] +
+                             [(window, WINDOW_MARK, None, "w")])
     except SourceError:
         pass
 
@@ -121,10 +124,12 @@ def restore(pane_id, window=None):
     try:
         mark = tmux_src.option(pane_id, MARK)
         if mark:
-            saved = _decode(mark)
-            for name in TINTS:
-                tmux_src.set_option(pane_id, name, saved.get(name))
-            tmux_src.set_option(pane_id, MARK, None)
+            record = _decode(mark)
+            saved = record.get("saved") or {}
+            wrote = record.get("wrote") or {name: styles()[name] for name in TINTS}  # unreadable: judge by today's look
+            tmux_src.set_options([(pane_id, name, saved.get(name), "p") for name in TINTS
+                                  if tmux_src.option(pane_id, name) == wrote.get(name)] +
+                                 [(pane_id, MARK, None, "p")])
         window = window or tmux_src.window_of(pane_id)
     except SourceError:
         pass
@@ -149,10 +154,13 @@ class Highlighter:
     """Keeps the highlight on the selected agent's pane. Calls tmux only when that pane changes."""
 
     def __init__(self):
-        self.pane, self.window, self.on = None, None, enabled()
+        self.pane, self.window, self.failed, self.on = None, None, None, enabled()
 
     def show(self, pane_id):
         pane_id = pane_id if self.on else None
+        if pane_id and pane_id == self.failed:
+            return  # tmux refused it: tried again only once the selection has moved
+        self.failed = None
         if pane_id == self.pane:
             return
         old, old_window = self.pane, self.window
@@ -164,7 +172,7 @@ class Highlighter:
                 self.window = apply(pane_id)
             except SourceError:
                 restore(pane_id)  # half applied, or the pane is gone: leave nothing behind
-                self.pane = None
+                self.pane, self.failed = None, pane_id
         if old:
             # After the new pane is marked: a move within one window keeps its border styles in place.
             restore(old, old_window)
