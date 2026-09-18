@@ -45,9 +45,15 @@ def button_labels(offered, columns):
 
 
 def can_instruct(agent):
-    if agent.auth or agent.retired or look_only():
+    """An instruction typed into a pane lands on whatever the pane shows, so typing stops while it
+    shows a credential prompt or waits on the owner: there Enter or a letter would answer the prompt.
+    A Codex agent with no pane gets the instruction through `codex queue`, which types into nothing,
+    so a login problem its latest answer reports leaves the instruction line on for the retry."""
+    if agent.retired or look_only():
         return False
-    return bool(agent.pane_id) or agent.kind == "codex"
+    if agent.pane_id:
+        return not (agent.auth or agent.needs_owner)
+    return agent.kind == "codex"
 
 
 def title(agent, parent_name):
@@ -66,14 +72,24 @@ def body(agent, recent, reply, columns, glyphs=None):
     full, never cut: the owner must be able to read all of it."""
     glyphs = glyphs or menu_style.UNICODE
     out = []
-    if agent.auth:
+    if agent.auth and agent.pane_id:
         out.append(("NEEDS LOGIN", "head"))
         out += _wrapped(f"This agent is waiting for a credential: {agent.auth}.", columns, "warn")
         out += _wrapped("Open its pane and type it there. The menu never carries or records a secret.", columns, "plain")
+    elif agent.auth:
+        out.append(("NEEDS LOGIN", "head"))
+        out += _wrapped(f"Its latest answer reports a login problem: {agent.auth}.", columns, "warn")
+        out += _wrapped("Log in from your own terminal, then send it an instruction to try again. The menu never "
+                        "carries or records a secret.", columns, "plain")
     elif agent.needs_owner:
         out.append((f"NEEDS YOU ({agent.needs_owner})", "head"))
-        out += _wrapped("This agent is waiting for an answer from you. Open its pane to read and answer it.",
-                        columns, "warn")
+        if agent.pane_id:
+            where = "Open its pane to read and answer it."
+        elif agent.kind == "codex":
+            where = f"It has no pane: open it in a terminal with `codex resume {agent.session_id}` to read and answer it."
+        else:
+            where = "It runs in no pane: attach it to read and answer it."
+        out += _wrapped(f"This agent is waiting for an answer from you. {where}", columns, "warn")
     else:
         out.append((f"STATE      {LABELS[menu_render.status(agent)]}", "head"))
     if agent.children:
@@ -98,10 +114,12 @@ def body(agent, recent, reply, columns, glyphs=None):
     if not can_instruct(agent):
         if look_only():
             why = "look-only mode: no instruction line and no Retire"
-        elif agent.auth:
-            why = "instruction line is off while a credential prompt is on screen"
         elif agent.retired:
             why = "this agent is retired"
+        elif agent.auth:
+            why = "instruction line is off while a credential prompt is on screen"
+        elif agent.needs_owner and agent.pane_id:
+            why = "instruction line is off while it waits for your answer: typed text would answer its prompt"
         else:
             why = "a Claude session with no pane takes input only in its own terminal: use Attach"
         out.append(("", "blank"))

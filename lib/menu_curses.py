@@ -6,6 +6,7 @@ import menu_style
 
 PAIRS = {"red": 1, "yellow": 2, "cyan": 3}
 ATTRS = {"bold": curses.A_BOLD, "dim": curses.A_DIM, "reverse": curses.A_REVERSE}
+CLICKS = curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED
 
 
 def usable_terminal(environ=None):
@@ -28,9 +29,21 @@ def setup(screen):
         pass
     if hasattr(curses, "set_escdelay"):
         curses.set_escdelay(25)
-    curses.mousemask(curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED)
+    curses.mousemask(CLICKS)
     screen.keypad(True)
     return colour
+
+
+def click():
+    """(x, y) of a button-1 click or press, or None for any other mouse report. A release is not a
+    click: after a press held longer than a click, ncurses reports the release as an event of its
+    own at the next input, a wheel turn for example, and taking that for a second click would
+    confirm an armed Retire that nobody confirmed."""
+    try:
+        _, x, y, _, bstate = curses.getmouse()
+    except curses.error:
+        return None
+    return (x, y) if bstate & CLICKS else None
 
 
 def look(state, colour):

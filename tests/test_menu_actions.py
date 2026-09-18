@@ -1,5 +1,6 @@
 """Tests for lib/menu_actions.py against the stub tmux. They assert the exact keys sent,
 and that nothing is sent when a safety rule says no."""
+import dataclasses
 import json
 import os
 import shutil
@@ -16,10 +17,12 @@ from menu_fixtures import LIB, FakeCodexDaemon, Machine
 
 sys.path.insert(0, str(LIB))
 import agent_state  # noqa: E402
+import auth_readers  # noqa: E402
 import menu_actions  # noqa: E402
 from sources import tmux_src  # noqa: E402
 
 THREAD = "0c0c0c0c-0000-7000-8000-00000000abcd"
+ENTER_DELAY = tmux_src.ENTER_DELAY      # the shipped value, read before any test patches it
 
 
 class MenuActionsTest(unittest.TestCase):
@@ -30,6 +33,9 @@ class MenuActionsTest(unittest.TestCase):
         patcher = mock.patch.dict(os.environ, self.m.env, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
+        no_wait = mock.patch.object(tmux_src, "ENTER_DELAY", 0)      # the stub pane needs no settling time
+        no_wait.start()
+        self.addCleanup(no_wait.stop)
         self.m.pane(7, 700, "codex", "builder | proj", screen="› Ask Codex to do anything\n")
         self.agent = agent_state.Agent(key="codex:t1", kind="codex", name="builder", session_id="t1",
                                        pane_id="%7", pane_pid=700)
@@ -211,8 +217,91 @@ class MenuActionsTest(unittest.TestCase):
 
     def test_open_pane_focuses_and_logs(self):
         self.assertEqual(menu_actions.open_pane(self.agent), "pane focused")
-        self.assertEqual(self.acted(), ["select-window -t %7", "select-pane -t %7"])
+        # The client is switched first: select-window alone would not show a pane in another session.
+        self.assertEqual(self.acted(), ["switch-client -t %7", "select-window -t %7", "select-pane -t %7"])
         self.assertEqual([a["result"] for a in self.m.actions()], ["attempt", "focused"])
+
+    def test_a_pane_that_waits_on_the_owner_gets_no_keys(self):
+        """Typed text lands on the prompt: Enter picks the highlighted answer, and Codex takes single
+        letters as answers (a: yes for the whole session). So nothing is typed while a pane waits on
+        the owner, whichever way that shows, and the check uses the pane as it is now."""
+        menu = ("Do you want to proceed?\n❯ 1. Yes\n  2. Yes, and don't ask again\n"
+                "  3. No, and tell Claude what to do differently (esc)\n")
+        for label, extra, title, screen in (
+                ("flagged in the popup's reading", {"needs_owner": 1}, "builder | proj", "› Ask Codex\n"),
+                ("an Action Required title", {}, "[ . ] Action Required | builder | proj", "› Ask Codex\n"),
+                ("an approval menu on screen", {}, "builder | proj", menu)):
+            with self.subTest(label):
+                self.m.panes = [(7, 700, "codex", title)]
+                self.m.write()
+                (self.m.dir / "screen-7.txt").write_text(screen)
+                with self.assertRaises(menu_actions.Refused):
+                    menu_actions.instruct(dataclasses.replace(self.agent, **extra), "wait, explain why first")
+        self.assertEqual([c for c in self.acted() if c.startswith("send-keys")], [])
+        self.assertEqual({(a["action"], a["result"]) for a in self.m.actions()}, {("refused", "waiting for the owner")})
+
+    def test_a_pane_in_copy_mode_or_with_synchronized_panes_gets_no_keys(self):
+        """In copy mode, which scrolling back enters, the keys drive the mode and the text is lost.
+        With synchronize-panes on, it would be typed into every pane of the window."""
+        for flags, reason in (((True, False), "copy mode"), ((False, True), "synchronize-panes")):
+            with self.subTest(reason):
+                self.m.panes = [(7, 700, "codex", "builder | proj", *flags)]
+                self.m.write()
+                with self.assertRaisesRegex(menu_actions.Refused, reason):
+                    menu_actions.instruct(self.agent, "rerun all specs")
+        self.assertEqual([c for c in self.acted() if c.startswith("send-keys")], [])
+        self.m.panes = [(7, 700, "codex", "builder | proj", True, False)]
+        self.m.write()
+        self.assertEqual(menu_actions.open_pane(self.agent), "pane focused")       # looking at it is fine
+
+    def test_a_claude_pane_is_checked_by_process_not_by_its_status_title(self):
+        """Claude Code puts live status in its title, so the check before typing follows the process,
+        as the match did: alive, under the pane, and the foreground of the pane's terminal."""
+        self.m.pane(4, 400, "claude", "2 awaiting input · claude agents")
+        self.m.process(500, 400, pgrp=500, tpgid=500)
+        session = agent_state.Agent(key="claude:s", kind="claude", name="lead", session_id="s",
+                                    pane_id="%4", pane_pid=400, pid=500)
+        self.assertEqual(menu_actions.open_pane(session), "pane focused")
+        self.assertEqual(menu_actions.instruct(session, "hello"), "typed into its pane")
+        # Stopped with Ctrl+Z while another session runs in the same shell: still under the pane, but
+        # not what it shows.
+        self.m.process(500, 400, pgrp=500, tpgid=501)
+        self.m.process(501, 400, pgrp=501, tpgid=501)
+        with self.assertRaises(menu_actions.Refused):
+            menu_actions.instruct(session, "hello again")
+        self.assertEqual([c for c in self.acted() if c.startswith("send-keys -t %4 -l")], ["send-keys -t %4 -l -- hello"])
+
+    def test_enter_waits_until_the_typing_has_settled(self):
+        """Codex reads an Enter that follows a fast burst of keys within 120 ms as a newline inside a
+        paste, so an Enter sent right behind the text would leave the instruction unsubmitted."""
+        self.assertGreater(ENTER_DELAY, 0.12)
+        with mock.patch.object(tmux_src, "ENTER_DELAY", ENTER_DELAY), mock.patch.object(tmux_src.time, "sleep") as slept:
+            menu_actions.instruct(self.agent, "hello")
+        slept.assert_called_once_with(ENTER_DELAY)
+        self.assertEqual([c for c in self.acted() if c.startswith("send-keys")],
+                         ["send-keys -t %7 -l -- hello", "send-keys -t %7 Enter"])
+
+    def test_a_failed_enter_is_not_reported_as_nothing_sent(self):
+        """The text is already in the pane. 'Not done' would invite a second send, which doubles it."""
+        wrapper = self.m.dir / "tmux-enter-fails"
+        wrapper.write_text("#!/usr/bin/env bash\n[[ \"$*\" == \"send-keys -t %7 Enter\" ]] && "
+                           f"{{ echo 'lost server' >&2; exit 1; }}\nexec {self.m.env['TMUX_BIN']} \"$@\"\n")
+        wrapper.chmod(0o755)
+        with mock.patch.dict(os.environ, {"TMUX_BIN": str(wrapper)}):
+            note, ok, close = menu_actions.perform(self.agent, "Send", "run the tests")
+        self.assertTrue(ok, note)                       # so the popup clears the line instead of keeping it
+        self.assertIn("Enter failed", note)
+        self.assertEqual([a["result"] for a in self.m.actions()], ["attempt", "typed, Enter failed"])
+
+    def test_perform_acts_only_on_a_button_that_is_still_offered(self):
+        """A key already on its way when a reload withdrew the button must not act. Here the agent was
+        retired meanwhile, so Send would queue into its archived thread."""
+        retired = agent_state.Agent(key="codex:t2", kind="codex", name="quiet", session_id="t2",
+                                    spawned=True, retired=True)
+        self.assertEqual(menu_actions.perform(retired, "Send", "hello"),
+                         ("not done: that is no longer offered for this agent", False, False))
+        self.assertFalse((self.m.dir / "codex-calls.txt").exists())
+        self.assertEqual(self.m.actions(), [])
 
 
 @unittest.skipUnless(shutil.which("tmux"), "needs a real tmux")
@@ -277,6 +366,41 @@ class RealTmuxFormatTest(unittest.TestCase):
         time.sleep(1.2)
         self.assertTrue(control.exists(), "the control did not run, so this test proves nothing")
         self.assertFalse(marker.exists(), "the popup title ran a shell command")
+
+    def test_copy_mode_and_synchronized_panes_are_seen(self):
+        pane = subprocess.run(self.tmux + ["list-panes", "-t", "t", "-F", "#{pane_id}"],
+                              capture_output=True, text=True).stdout.split()[0]
+        (listed,) = [p for p in tmux_src.list_panes() if p["pane_id"] == pane]
+        self.assertEqual((listed["in_mode"], listed["synchronized"]), (False, False))
+        subprocess.run(self.tmux + ["copy-mode", "-t", pane], check=True)
+        subprocess.run(self.tmux + ["set-option", "-w", "-t", pane, "synchronize-panes", "on"], check=True)
+        (listed,) = [p for p in tmux_src.list_panes() if p["pane_id"] == pane]
+        self.assertEqual((listed["in_mode"], listed["synchronized"]), (True, True))
+
+    def test_a_prompt_wider_than_its_pane_is_still_recognised(self):
+        """tmux wraps a long prompt over two screen lines. Read unjoined, a pattern anchored to the
+        line missed it, and the instruction line stayed on above a password prompt."""
+        subprocess.run(self.tmux + ["new-session", "-d", "-s", "narrow", "-x", "36", "-y", "10",
+                                    "printf \"Password for 'https://someone@github.example.com': \"; sleep 30"],
+                       check=True)
+        pane = subprocess.run(self.tmux + ["list-panes", "-t", "narrow", "-F", "#{pane_id}"],
+                              capture_output=True, text=True).stdout.split()[0]
+        for _ in range(40):
+            screen = tmux_src.capture(pane)
+            if "github" in screen:
+                break
+            time.sleep(0.05)
+        self.assertEqual(auth_readers.detect_screen(screen), "password")
+
+    def test_focus_brings_a_pane_in_another_session_to_the_client(self):
+        self.attach_client()                                                   # the client shows session t
+        subprocess.run(self.tmux + ["new-session", "-d", "-s", "u", "sleep 60"], check=True)
+        pane = subprocess.run(self.tmux + ["list-panes", "-t", "u", "-F", "#{pane_id}"],
+                              capture_output=True, text=True).stdout.split()[0]
+        tmux_src.focus(pane)
+        shown = subprocess.run(self.tmux + ["list-clients", "-F", "#{client_session}"],
+                               capture_output=True, text=True).stdout.split()
+        self.assertEqual(shown, ["u"])
 
     def test_a_hostile_name_is_shown_as_text_and_runs_nothing(self):
         marker = Path(self._tmp.name) / "pwned"

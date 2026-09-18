@@ -1,10 +1,21 @@
 """tmux: list panes, read a pane, type into a pane, focus a pane, open a popup or window."""
 import os
 import subprocess
+import time
 
 from .base import SourceError
 
-FIELDS = "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_title}"
+# The title comes last and may itself hold tabs, so a line is split at most len(FIELDS) - 1 times.
+FIELDS = ("#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}\t#{pane_pid}\t#{pane_current_command}"
+          "\t#{pane_in_mode}\t#{pane_synchronized}\t#{pane_title}")
+# Codex takes keys that arrive in a fast burst as a paste, and an Enter within 120 ms of that burst as
+# a newline inside it (codex-rs tui paste_burst.rs, PASTE_ENTER_SUPPRESS_WINDOW). send-keys types the
+# text as exactly such a burst, so the Enter waits until the burst is over, or it would not submit.
+ENTER_DELAY = 0.3
+
+
+class EnterFailed(SourceError):
+    """The text was typed, but the Enter after it failed. Typing it again would double it."""
 
 
 def _tmux(*args, timeout=1.5):
@@ -30,15 +41,17 @@ def list_panes():
     """One dict per pane. Grouped sessions list each pane twice, so panes are keyed by `%id`."""
     panes = {}
     for line in _tmux("list-panes", "-a", "-F", FIELDS).splitlines():
-        parts = line.split("\t")
-        if len(parts) != 5 or parts[0] in panes:
+        parts = line.split("\t", 6)
+        if len(parts) != 7 or parts[0] in panes:
             continue
         try:
             pid = int(parts[2])
         except ValueError:
             continue
-        panes[parts[0]] = {"pane_id": parts[0], "target": parts[1], "pid": pid,
-                           "command": parts[3], "title": parts[4]}
+        # in_mode: copy or view mode, where keys drive the mode and never reach the program.
+        # synchronized: keys typed into the pane go to every pane of its window.
+        panes[parts[0]] = {"pane_id": parts[0], "target": parts[1], "pid": pid, "command": parts[3],
+                           "in_mode": parts[4] == "1", "synchronized": parts[5] == "1", "title": parts[6]}
     return list(panes.values())
 
 
@@ -51,15 +64,22 @@ def pane_pid(pane_id):
 
 
 def capture(pane_id):
-    return _tmux("capture-pane", "-p", "-t", pane_id)
+    """The visible screen. -J joins lines the pane wrapped, so a prompt wider than the pane is read
+    as the one line it is, and a pattern anchored to its line still finds it."""
+    return _tmux("capture-pane", "-p", "-J", "-t", pane_id)
 
 
 def send_text(pane_id, text):
-    """Type `text` literally, then press Enter. `-l` stops tmux reading words as key names."""
+    """Type `text` literally, then press Enter once the typing has settled (see ENTER_DELAY).
+    `-l` stops tmux reading words as key names. Raises EnterFailed when only the Enter failed."""
     # -l types the text literally, with no key names and no formats. Only a trailing `;` still
     # needs care: tmux would take it as a command separator and drop it.
     _tmux("send-keys", "-t", pane_id, "-l", "--", text[:-1] + "\\;" if text.endswith(";") else text)
-    _tmux("send-keys", "-t", pane_id, "Enter")
+    time.sleep(ENTER_DELAY)
+    try:
+        _tmux("send-keys", "-t", pane_id, "Enter")
+    except SourceError as exc:
+        raise EnterFailed(str(exc)) from None
 
 
 def resize(pane_id, columns):
@@ -67,6 +87,12 @@ def resize(pane_id, columns):
 
 
 def focus(pane_id):
+    """Bring the pane to the owner. select-window and select-pane change only the pane's own session,
+    so the client is first switched to that session, which matters when the pane lives in another."""
+    try:
+        _tmux("switch-client", "-t", pane_id)
+    except SourceError:
+        pass  # no client to switch, as when called from outside tmux: selecting still works
     _tmux("select-window", "-t", pane_id)
     _tmux("select-pane", "-t", pane_id)
 
@@ -93,6 +119,19 @@ def new_window(name, command):
 def alive(pid):
     proc = os.environ.get("AGENT_MENU_PROC_ROOT") or "/proc"
     return bool(pid) and os.path.isdir(os.path.join(proc, str(pid)))
+
+
+def in_foreground(pid):
+    """Whether `pid`'s process group is the foreground group of its terminal, which is what a pane
+    shows: True or False, or None when /proc cannot say (no terminal, no such process)."""
+    proc = os.environ.get("AGENT_MENU_PROC_ROOT") or "/proc"
+    try:
+        with open(os.path.join(proc, str(pid), "stat"), encoding="utf-8", errors="replace") as fh:
+            fields = fh.read().rsplit(")", 1)[1].split()
+        pgrp, tpgid = int(fields[2]), int(fields[5])     # after the name: state ppid pgrp session tty tpgid
+    except (OSError, ValueError, IndexError):
+        return None
+    return None if pgrp <= 0 or tpgid <= 0 else pgrp == tpgid
 
 
 def ancestors(pid, limit=40):

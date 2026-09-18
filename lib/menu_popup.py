@@ -75,6 +75,10 @@ def _step(state, offered, event, page, now, burst, since):
             return _press(state, value, now, confirming=True)   # a second click on the armed button confirms
         return dataclasses.replace(state, confirm=""), ""
 
+    if state.typing and "Send" not in offered:
+        # A reload withdrew the instruction line while it was open (the agent was retired, or now
+        # waits on a prompt). The key meant for that line closes it and does nothing else.
+        return dataclasses.replace(state, typing=False), ""
     if state.typing:                                   # while typing, letters are text, never hotkeys
         if (kind, value) == ("key", "esc"):
             return dataclasses.replace(state, typing=False), ""

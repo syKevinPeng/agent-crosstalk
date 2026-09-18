@@ -15,6 +15,7 @@ import subprocess
 
 import agent_state
 import auth_readers
+import menu_detail
 from sources import tmux_src
 from sources.base import SourceError
 
@@ -60,7 +61,8 @@ def _log(agent, action, result, **extra):
 
 def _same_pane(agent):
     """The pane must still hold the same first process AND still be running the agent's CLI in the
-    foreground. When a CLI exits, its shell keeps the pane and the pid, so the pid alone proves nothing."""
+    foreground. When a CLI exits, its shell keeps the pane and the pid, so the pid alone proves nothing.
+    Returns the pane as tmux lists it now."""
     try:
         panes = tmux_src.list_panes()
     except SourceError:
@@ -70,15 +72,24 @@ def _same_pane(agent):
         raise Refused("that pane is gone")
     if now["pid"] != agent.pane_pid or now["command"] != agent.kind:
         raise Refused("that pane now runs something else")
-    if agent.name not in agent_state.title_names(agent.kind, now["title"]):
-        # Same shell, same CLI, but the title names another session: the owner quit one and started another.
-        raise Refused("that pane now shows a different session")
-    if agent.kind == "claude" and agent.pid:
+    if agent.kind == "claude":
+        # Checked the way it was matched: by process. Claude Code rewrites its title with live status,
+        # so the title may not name the session at all.
         if not tmux_src.alive(agent.pid):
             raise Refused("that session's process is gone")
         owner = agent_state.pane_for_pid(agent.pid, panes)
         if not owner or owner["pane_id"] != agent.pane_id:
             raise Refused("that session no longer runs in that pane")
+        # Still under the pane is not enough: stopped with Ctrl+Z while another session runs in the
+        # same shell, it stays under the pane but is not what the pane shows. The terminal's foreground
+        # group says which one is. Only when /proc cannot tell does the title decide.
+        shown = tmux_src.in_foreground(agent.pid)
+        if shown is False or (shown is None and agent.name not in agent_state.title_names(agent.kind, now["title"])):
+            raise Refused("that pane now shows a different session")
+    elif agent.name not in agent_state.title_names(agent.kind, now["title"]):
+        # Same shell, same CLI, but the title names another session: the owner quit one and started another.
+        raise Refused("that pane now shows a different session")
+    return now
 
 
 def instruct(agent, text):
@@ -89,17 +100,33 @@ def instruct(agent, text):
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
         raise Refused("an instruction is one line of plain text: no line breaks or control characters")
     if agent.pane_id:
-        _same_pane(agent)
+        pane = _same_pane(agent)
+        if pane["in_mode"]:
+            # Copy mode (entered by scrolling back) takes the keys itself: the text would be lost, and
+            # a letter such as f or t would leave a jump prompt open on the owner's screen.
+            raise Refused("that pane is in copy mode. Leave it (q) and try again")
+        if pane["synchronized"]:
+            raise Refused("that window has synchronize-panes on, so the text would go to every pane in it")
         try:
-            label = auth_readers.detect_screen(tmux_src.capture(agent.pane_id))
+            screen = tmux_src.capture(agent.pane_id)
         except SourceError:
             raise Refused("that pane could not be read") from None
+        label = auth_readers.detect_screen(screen)
         if label:
             _result(agent, "refused", "auth prompt on screen", request_text=label)
             raise Refused(f"that pane is asking for a credential ({label}). Open the pane and type it there")
+        # Checked on the pane as it is now: the popup's reading can be older than the prompt.
+        if agent.needs_owner or agent_state.waits_on_owner(pane["title"], screen):
+            _result(agent, "refused", "waiting for the owner")
+            raise Refused("that pane is waiting for your answer, and typed text would answer its prompt. "
+                          "Open the pane and answer it there")
         _attempt(agent, "instruct", instruction=text)
         try:
             tmux_src.send_text(agent.pane_id, text)
+        except tmux_src.EnterFailed as exc:
+            # The text is in the pane. Reporting a failure would invite a second send, which doubles it.
+            _result(agent, "instruct", "typed, Enter failed", error=str(exc))
+            return "typed into its pane, but Enter failed: press Enter there, do not send it again"
         except SourceError as exc:
             _result(agent, "instruct", "error", error=str(exc))
             raise Refused(str(exc)) from None
@@ -176,6 +203,12 @@ def perform(agent, button, text=""):
     actions = {"Open pane": (open_pane, True), "Attach": (attach, True), "Retire": (retire, False)}
     if button in ("Send", "Retire") and os.environ.get("AGENT_MENU_LOOK_ONLY"):
         return "not done: look-only mode", False, False      # refused here too, not only hidden in the popup
+    if button not in ("Send", *actions):
+        return "", False, False
+    if button not in menu_detail.buttons(agent):
+        # The popup's own rule, checked again here: a reload may have withdrawn the button (the agent
+        # was retired, or now waits on a prompt) while a key for it was already on its way.
+        return "not done: that is no longer offered for this agent", False, False
     try:
         if button == "Send":
             return instruct(agent, text), True, False

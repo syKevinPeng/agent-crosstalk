@@ -44,6 +44,7 @@ exit "${STUB_CODEX_EXIT:-1}"
 
 CLAUDE_STUB = r"""#!/usr/bin/env bash
 [[ -n ${STUB_CLAUDE_FAIL:-} ]] && exit 7
+[[ $1 == agents && " $* " == *" --all "* ]] && { cat "$STUB_DIR/claude-all.json"; exit 0; }
 [[ $1 == agents ]] && { cat "$STUB_DIR/claude.json"; exit 0; }
 if [[ $1 == -p ]]; then
   [[ -n ${STUB_USAGE_FAIL:-} ]] && exit 3
@@ -67,7 +68,7 @@ class Machine:
         self.sock = str(self.dir / "d.sock")
         self.proc = self.dir / "proc"
         self.proc.mkdir()
-        self.panes, self.claude = [], []
+        self.panes, self.claude, self.claude_finished = [], [], []
         self.usage(USAGE_TEXT)
         self.env = dict(os.environ, STUB_DIR=str(self.dir), CODEX_APP_SERVER_SOCK=self.sock,
                         TMUX_BIN=str(executable(self.dir / "tmux-stub", TMUX_STUB)),
@@ -79,10 +80,13 @@ class Machine:
                         AGENT_MENU_ACTIONS_LOG=str(self.dir / "menu-actions.jsonl"))
         self.write()
 
-    def process(self, pid, parent):
+    def process(self, pid, parent, pgrp=None, tpgid=None):
+        """A /proc entry. With `pgrp` and `tpgid` it also says whether the process group is the
+        foreground of its terminal (pgrp == tpgid), as the real stat line does."""
         folder = self.proc / str(pid)
         folder.mkdir(exist_ok=True)
-        (folder / "stat").write_text(f"{pid} (some proc) S {parent} 0 0")
+        tail = f" {pgrp} 0 34816 {tpgid}" if pgrp is not None else " 0 0"
+        (folder / "stat").write_text(f"{pid} (some proc) S {parent}{tail}")
 
     def pane(self, number, pid, command, title, screen=""):
         self.panes.append((number, pid, command, title))
@@ -98,10 +102,16 @@ class Machine:
         self.write()
 
     def write(self):
-        rows = [f"%{n}\tmain:1.{n}\t{pid}\t{cmd}\t{title}" for n, pid, cmd, title in self.panes]
+        """A pane is (number, pid, command, title) or, with its flags, (…, in_mode, synchronized)."""
+        rows = []
+        for n, pid, cmd, title, *flags in self.panes:
+            in_mode, synchronized = (list(flags) + [False, False])[:2]
+            rows.append(f"%{n}\tmain:1.{n}\t{pid}\t{cmd}\t{int(in_mode)}\t{int(synchronized)}\t{title}")
         rows += rows  # a grouped session lists every pane twice
         (self.dir / "panes.tsv").write_text("\n".join(rows) + ("\n" if rows else ""))
         (self.dir / "claude.json").write_text(json.dumps(self.claude))
+        # `claude agents --json --all` adds finished background sessions to the live ones.
+        (self.dir / "claude-all.json").write_text(json.dumps(self.claude + self.claude_finished))
 
     def usage(self, text):
         (self.dir / "usage.txt").write_text(text)

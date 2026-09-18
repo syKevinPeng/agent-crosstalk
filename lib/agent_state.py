@@ -8,6 +8,11 @@ from sources import claude_src, codex_src, logs_src, tmux_src
 from sources.base import SourceError, clean
 
 RETIRED_VISIBLE = datetime.timedelta(minutes=10)
+QUESTIONS = re.compile(r"\?\s+(\d+) questions?\b")
+# An approval menu at the bottom of a pane, as both CLIs draw it: a first option "1. Yes…" and a later
+# "N. No…", with an optional selection cursor in front.
+APPROVAL_YES = re.compile(r"^(?:[❯›>]\s*)?1\.\s+Yes\b")
+APPROVAL_NO = re.compile(r"^(?:[❯›>]\s*)?\d\.\s+No\b")
 
 
 @dataclasses.dataclass
@@ -55,6 +60,17 @@ def title_names(kind, title):
         segments = {title.strip()}
     names = set(segments) | {re.sub(r"^[^\w\s]{1,2}\s+", "", segment) for segment in segments}
     return {clean(name) for name in names if name}
+
+
+def waits_on_owner(title, screen):
+    """True when a pane shows a prompt that waits on the owner: Codex's "Action Required" title, or an
+    approval menu at the bottom of the screen. Text typed into such a pane answers the prompt: Enter
+    picks the highlighted option, and Codex takes single letters as answers too."""
+    if "Action Required" in (title or ""):
+        return True
+    lines = auth_readers.tail(screen)
+    first = next((i for i, line in enumerate(lines) if APPROVAL_YES.search(line)), None)
+    return first is not None and any(APPROVAL_NO.search(line) for line in lines[first + 1:])
 
 
 def pane_for_pid(pid, panes):
@@ -151,10 +167,13 @@ def collect(now=None):
         spawned = logs_src.spawned()
     except SourceError:
         spawned, _ = [], errors.append("spawn log: unreadable")
-    recent_ids = [s["id"] for s in spawned if s["kind"] == "codex"
-                  and (s["retired_at"] is None or now - s["retired_at"] < RETIRED_VISIBLE)]
-    for label, reader in (("claude", claude_src.list_sessions),
-                          ("codex", lambda: codex_src.list_threads(extra_ids=recent_ids))):
+    # Spawned agents are looked up by their recorded ids too, because a finished one drops out of
+    # the plain listings while it is still spawn-peer's to retire.
+    recent = [s for s in spawned if s["retired_at"] is None or now - s["retired_at"] < RETIRED_VISIBLE]
+    claude_ids = [s["id"] for s in recent if s["kind"] == "claude"]
+    codex_ids = [s["id"] for s in recent if s["kind"] == "codex"]
+    for label, reader in (("claude", lambda: claude_src.list_sessions(extra_ids=claude_ids)),
+                          ("codex", lambda: codex_src.list_threads(extra_ids=codex_ids))):
         try:
             raw.extend(reader())
         except SourceError:
@@ -183,14 +202,14 @@ def collect(now=None):
         if agent.state == "needs_owner":
             agent.needs_owner = 1
         if agent.pane_id:
-            if "Action Required" in agent._title:
-                agent.needs_owner = max(agent.needs_owner, 1)
             try:
                 screen = tmux_src.capture(agent.pane_id)
             except SourceError:
                 screen = ""
+            if waits_on_owner(agent._title, screen):
+                agent.needs_owner = max(agent.needs_owner, 1)
             agent.auth = auth_readers.detect_screen(screen) or ""
-            asked = re.search(r"\?\s+(\d+) questions?\b", screen)
+            asked = QUESTIONS.search(screen)
             if asked and agent.needs_owner:
                 agent.needs_owner = int(asked.group(1))
 

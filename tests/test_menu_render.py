@@ -204,6 +204,22 @@ class RenderTest(unittest.TestCase):
             for row in menu_render.rows(self.snap(root), columns):
                 self.assertLessEqual(menu_render.width(row["text"]), columns, (columns, row["text"]))
 
+    def test_every_width_keeps_every_row_and_its_mark_on_screen(self):
+        """The wide layout needs room for its folder and model columns beside a name. Where it has not,
+        rows fall back to the normal layout rather than push the mark off the pane's edge."""
+        agent = root = self.agent("lead session", kind="claude", needs_owner=1, cwd="/home/x/work", model="m")
+        for depth in range(1, 5):
+            child = self.agent(f"child-{depth}", access="rw", open_messages=12, cwd="/w/a/b", model="gpt-6-astra")
+            agent.children.append(child)
+            agent = child
+        for columns in range(20, 64):
+            for glyph_set in (menu_style.UNICODE, menu_style.ASCII):
+                for row in menu_render.rows(self.snap(root), columns, glyphs=glyph_set):
+                    self.assertLessEqual(menu_render.width(row["text"]), columns, (columns, row["text"]))
+                    self.assertTrue(row["text"].endswith(row["mark"]), (columns, row["text"]))
+        wide = [r["text"] for r in menu_render.rows(self.snap(root), 62) if r["key"]]
+        self.assertIn("gpt-6-astra", " ".join(wide))                   # a wide pane still gets the columns
+
     def test_the_selected_row_is_always_on_screen(self):
         agents = [self.agent(f"agent{i:03}") for i in range(200)]
         rendered = menu_render.rows(self.snap(*agents, errors=["codex: unreachable"]), 34)

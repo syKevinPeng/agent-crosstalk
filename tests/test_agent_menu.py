@@ -1,9 +1,18 @@
 """Black-box tests for bin/agent-menu --once and bin/agent-menu-detail --print."""
 import datetime
+import importlib.machinery
+import importlib.util
+import os
+import pty
+import shlex
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from unittest import mock
 
 from menu_fixtures import BIN, FakeCodexDaemon, Machine
 
@@ -16,6 +25,18 @@ CODEX_C = "0e0e0e0e-0000-7000-8000-00000000000b"
 def stamp(minutes_ago):
     when = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes_ago)
     return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_script(name):
+    """Import one of the bin/ programs as a module, without running it."""
+    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(BIN / name))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    saved, sys.dont_write_bytecode = sys.dont_write_bytecode, True     # no bytecode cache left in bin/
+    try:
+        loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = saved
+    return module
 
 
 class AgentMenuTest(unittest.TestCase):
@@ -103,7 +124,8 @@ class AgentMenuTest(unittest.TestCase):
         self.assertTrue(any("builder" in l and l.endswith("codex !2") for l in self.tree()))
         text = self.detail(f"codex:{CODEX_P}").stdout
         self.assertIn("NEEDS YOU (2)", text)
-        self.assertIn("buttons: Open pane, Send", text)
+        self.assertIn("buttons: Open pane\n", text)           # typed text would answer the prompt: no Send
+        self.assertIn("typed text would answer its prompt", text)
 
     def test_an_auth_prompt_outranks_everything_and_turns_the_instruction_line_off(self):
         self.m.claude_session(CLAUDE_A, "pusher", 500, status="waiting", state="blocked")
@@ -134,7 +156,7 @@ class AgentMenuTest(unittest.TestCase):
         self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Open pane, Send")
         self.m.panes = []
         self.m.pane(8, 800, "codex", "[ . ] Action Required | builder | proj")      # a status segment in front
-        self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Open pane, Send")
+        self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Open pane")    # matched, but waiting: no Send
         self.m.panes = []
         self.m.pane(9, 900, "codex", "my builder | proj")                           # a substring is not a match
         self.assertEqual(self.buttons(f"codex:{CODEX_C}"), "buttons: Send")
@@ -254,6 +276,178 @@ class AgentMenuTest(unittest.TestCase):
         for key in (f"codex:{CODEX_P}", f"claude:{CLAUDE_B}"):
             proc = self.detail(key)
             self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_a_boolean_or_deeply_nested_log_line_breaks_nothing(self):
+        """JSON true where text belongs, or a line nested thousands of levels deep, is one more kind of
+        forged line: it must not blank the tree or crash a popup."""
+        self.m.claude_session(CLAUDE_A, "reviewer", 500)
+        self.codex_thread(CODEX_P, "builder")
+        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "builder", "id": CODEX_P,
+                                     "access": "read-only", "spawned_by": True, "time_utc": True})
+        self.m.log("messages.jsonl",
+                   {"channel": "codex queue", "thread_uuid": CODEX_P, "msg_id": "m1", "result": "queued",
+                    "first_line": True, "sender": True, "time_utc": True},
+                   "[" * 5000 + "]" * 5000)
+        lines = self.tree()
+        self.assertFalse(any("refresh failed" in l for l in lines), lines)
+        self.assertTrue(any("reviewer" in l for l in lines) and any("builder" in l for l in lines), lines)
+        for key in (f"codex:{CODEX_P}", f"claude:{CLAUDE_A}"):
+            proc = self.detail(key)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_a_codex_thread_that_reports_it_waits_on_the_owner_says_so_without_a_pane(self):
+        self.codex_thread(CODEX_P, "builder", status="active")
+        self.daemon.threads[CODEX_P]["status"] = {"type": "active", "activeFlags": ["waitingOnApproval"]}
+        lines = self.tree()
+        self.assertEqual(lines[0], " AGENTS  1 need you")
+        self.assertTrue(any("builder" in l and l.endswith("codex !1") for l in lines), lines)
+        text = self.detail(f"codex:{CODEX_P}").stdout
+        self.assertIn("NEEDS YOU (1)", text)
+        self.assertIn(f"codex resume {CODEX_P}", " ".join(text.split()))    # it has no pane to open
+        self.assertTrue(text.endswith("buttons: Send\n"), text)             # queueing answers no prompt
+        self.daemon.threads[CODEX_P]["status"] = {"type": "active", "activeFlags": []}
+        self.assertTrue(any("builder" in l and l.endswith("codex ⠋") for l in self.tree()))   # working again
+
+    def test_an_approval_menu_on_screen_means_needs_you_and_no_typing(self):
+        """Typed text would answer the menu: Enter picks the highlighted Yes."""
+        self.m.claude_session(CLAUDE_A, "lead", 500, background=False)
+        self.m.pane(4, 400, "claude", "✳ lead", screen="Bash command\n  git push --force origin main\n"
+                    "Do you want to proceed?\n❯ 1. Yes\n  2. Yes, and don't ask again for git push commands\n"
+                    "  3. No, and tell Claude what to do differently (esc)\n")
+        self.m.process(500, 400)
+        self.assertTrue(any("lead" in l and l.endswith("claude !1") for l in self.tree()))
+        self.assertEqual(self.buttons(f"claude:{CLAUDE_A}"), "buttons: Open pane")
+
+    def test_a_numbered_answer_is_not_mistaken_for_an_approval_menu(self):
+        self.m.claude_session(CLAUDE_A, "lead", 500, background=False)
+        self.m.pane(4, 400, "claude", "✳ lead", screen="Summary:\n1. Yes, the tests pass.\n2. The build is green.\n")
+        self.m.process(500, 400)
+        self.assertEqual(self.buttons(f"claude:{CLAUDE_A}"), "buttons: Open pane, Send")
+
+    def test_a_finished_spawned_claude_agent_stays_under_its_parent(self):
+        """A spawned Claude agent that finished drops out of `claude agents --json` but is still
+        spawn-peer's to retire, so it is looked up in `--all`. Other finished sessions stay out."""
+        self.codex_thread(CODEX_P, "lead thread")
+        done = {"pid": None, "status": "idle", "state": "done", "cwd": "/w", "kind": "background"}
+        self.m.claude_finished += [dict(done, sessionId=CLAUDE_B, id="bbbbbbbb", name="review"),
+                                   dict(done, sessionId=CLAUDE_A, id="aaaaaaaa", name="old history")]
+        self.m.write()
+        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "claude", "name": "review", "id": "bbbbbbbb",
+                                     "access": "read-only", "spawned_by": "codex/lead-thread"})
+        lines = self.tree()
+        parent = next(i for i, l in enumerate(lines) if "lead thread" in l)
+        self.assertTrue(lines[parent + 1].startswith("   └ review"), lines)
+        self.assertFalse(any("old history" in l for l in lines), lines)
+        self.assertTrue(self.buttons(f"claude:{CLAUDE_B}").endswith("Retire"))
+
+    def test_finished_sessions_are_looked_up_again_only_when_needed(self):
+        """Every `claude` start costs CPU and the listing runs every two seconds, so `--all` runs again
+        only when another spawned id goes missing, or once the lookup is a minute old."""
+        sys.path.insert(0, str(BIN.parent / "lib"))
+        from sources import claude_src
+        calls = []
+
+        def listing(extra_args=(), timeout=1.5):
+            calls.append(tuple(extra_args))
+            return [] if not extra_args else [{"short_id": "aa", "session_id": "A"}]
+        self.addCleanup(claude_src._finished.update, missing=frozenset(), at=float("-inf"), sessions=[])
+        claude_src._finished.update(missing=frozenset(), at=float("-inf"), sessions=[])
+        with mock.patch.object(claude_src, "_listing", side_effect=listing):
+            for _ in range(3):
+                self.assertEqual([s["short_id"] for s in claude_src.list_sessions(extra_ids=["aa"])], ["aa"])
+            self.assertEqual(calls.count(("--all",)), 1)
+            claude_src.list_sessions(extra_ids=["aa", "bb"])                 # another one went missing
+            self.assertEqual(calls.count(("--all",)), 2)
+            with mock.patch.object(claude_src.time, "monotonic", return_value=time.monotonic() + 61):
+                claude_src.list_sessions(extra_ids=["aa", "bb"])             # the lookup is a minute old
+            self.assertEqual(calls.count(("--all",)), 3)
+
+    def test_the_popup_gets_the_sidebars_settings(self):
+        """tmux starts a popup with the tmux server's environment, not the sidebar's. The sidebar hands
+        its settings over on the popup's command line, so look-only mode survives that step."""
+        menu = load_script("agent-menu")
+        environ = {"AGENT_MENU_LOOK_ONLY": "1", "AGENT_COMMS_LOG": "/tmp/a b/log", "UNRELATED": "x"}
+        words = shlex.split(menu.detail_command("codex:abc", environ))
+        self.assertEqual(words[0], "env")
+        self.assertIn("AGENT_MENU_LOOK_ONLY=1", words)
+        self.assertIn("AGENT_COMMS_LOG=/tmp/a b/log", words)
+        self.assertNotIn("UNRELATED=x", words)
+        self.assertEqual(words[-3:], [sys.executable, os.path.join(menu.BIN, "agent-menu-detail"), "codex:abc"])
+
+    def test_a_failed_refresh_keeps_the_popup_and_says_so(self):
+        """A source that could not be read must not look like the agent is gone: that closed the popup
+        and threw away the instruction being typed."""
+        detail = load_script("agent-menu-detail")
+        last = ("the agent", "", [], "", [])
+        with mock.patch.object(detail, "load", return_value=(None, "", [], "", ["claude: unreachable"])):
+            kept, note = detail.reload("claude:x", last)
+        self.assertIs(kept, last)
+        self.assertIn("claude: unreachable", note)
+        with mock.patch.object(detail, "load", return_value=(None, "", [], "", [])):   # read fine: really gone
+            gone, note = detail.reload("claude:x", last)
+        self.assertEqual((gone[0], note), (None, ""))
+
+    def test_a_mouse_report_that_is_no_click_is_no_event(self):
+        """The release after a held press arrives as a mouse report of its own. The popup reads past
+        it, so it neither confirms an armed Retire nor cancels one. The next real key comes through."""
+        import curses
+        detail = load_script("agent-menu-detail")
+        keys = iter([curses.KEY_MOUSE, "y"])
+        screen = mock.Mock(get_wch=lambda: next(keys))
+        with mock.patch.object(detail.menu_curses, "click", return_value=None):
+            self.assertEqual(detail.read_event(screen), ("char", "y"))
+
+    def test_a_popup_too_small_to_show_its_buttons_acts_on_no_key(self):
+        """A popup too small for its buttons draws only "too small": no buttons, no confirm hint. The
+        keys that retire an agent in a full-size popup, r and then Enter, must do nothing there."""
+        self.codex_thread(CODEX_C, "kid")
+        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "kid", "id": CODEX_C,
+                                     "cwd": "/w", "access": "read-only", "spawned_by": "claude/x"})
+        env = dict(self.m.env, TERM="xterm-256color", LINES="8", COLUMNS="98")
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.execve(sys.executable, [sys.executable, str(BIN / "agent-menu-detail"), f"codex:{CODEX_C}"], env)
+        shown = bytearray()
+
+        def drain():
+            while True:
+                try:
+                    chunk = os.read(fd, 65536)
+                except OSError:
+                    return
+                if not chunk:
+                    return
+                shown.extend(chunk)
+        threading.Thread(target=drain, daemon=True).start()
+        try:
+            deadline = time.monotonic() + 20
+            while b"too small" not in shown and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertIn(b"too small", shown)
+            for key, pause in ((b"r", 0.8), (b"\r", 1.0), (b"q", 0.0)):
+                os.write(fd, key)
+                time.sleep(pause)
+            deadline, ended = time.monotonic() + 10, False
+            while not ended and time.monotonic() < deadline:
+                ended = os.waitpid(pid, os.WNOHANG)[0] == pid
+                time.sleep(0.05)
+            self.assertTrue(ended, "q did not close the popup")
+        finally:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+            except OSError:
+                pass
+            os.close(fd)
+        self.assertNotIn("thread/archive", self.daemon.methods())
+        self.assertEqual(self.m.actions(), [])
+
+    def test_a_locale_that_is_not_installed_stops_neither_program(self):
+        self.m.claude_session(CLAUDE_A, "reviewer", 500)
+        self.assertTrue(any("reviewer" in l for l in self.tree(LC_ALL="xx_XX.UTF-8")))
+        proc = subprocess.run([sys.executable, str(BIN / "agent-menu-detail"), "--print", f"claude:{CLAUDE_A}"],
+                              env=dict(self.m.env, LC_ALL="xx_XX.UTF-8"), capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def test_a_name_of_only_spaces_falls_back_to_the_id(self):
         self.codex_thread(CODEX_P, "   ")
@@ -382,6 +576,11 @@ class AgentMenuTest(unittest.TestCase):
         text = self.detail(f"codex:{CODEX_P}").stdout
         self.assertIn("NEEDS LOGIN", text)
         self.assertIn("ssh key rejected", text)
+        # It has no pane to type a secret into, and `codex queue` types into nothing: after logging in,
+        # the owner tells it to try again from here, so the instruction line stays on.
+        self.assertNotIn("Open its pane", text)
+        self.assertIn("Log in from your own terminal", text)
+        self.assertTrue(text.endswith("buttons: Send\n"), text)
 
     def test_popup_sentences_wrap_at_words_for_any_width(self):
         sys.path.insert(0, str(BIN.parent / "lib"))

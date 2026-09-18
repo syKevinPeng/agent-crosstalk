@@ -30,10 +30,12 @@ CHAR_KEYS = {"\x1b": "esc", "\n": "enter", "\r": "enter", "\t": "tab", "\x7f": "
 
 
 def load(key):
+    """(agent, parent name, recent messages, latest answer, errors). `errors` names the sources that
+    could not be read: when it is not empty, a missing agent may only be missing from this reading."""
     snapshot = agent_state.safe_collect()
     agent = snapshot.by_key.get(key)
     if not agent:
-        return None, "", [], ""
+        return None, "", [], "", snapshot.errors
     parent = snapshot.by_key.get(agent.parent_key)
     try:
         recent = logs_src.recent(agent.session_id, agent.name)
@@ -49,48 +51,62 @@ def load(key):
             reply = ""
         reply = "\n".join(agent_state.clean(line.replace("\t", " ")) for line in reply.splitlines())
         agent.auth = agent.auth or (auth_readers.detect_output(reply) or "")
-    return agent, (parent.name if parent else ""), recent, reply
+    return agent, (parent.name if parent else ""), recent, reply, snapshot.errors
+
+
+def reload(key, loaded):
+    """A fresh reading, and a note that is empty unless the refresh failed. A reading that failed to
+    list the agent while a source was unreadable keeps the last one: one failed refresh must not end
+    the popup and the instruction being typed in it."""
+    fresh = load(key)
+    if fresh[0] is None and fresh[4] and loaded[0] is not None:
+        return loaded, "not refreshed (" + "; ".join(fresh[4]) + "): showing the last reading"
+    return fresh, ""
 
 
 def read_event(screen):
-    """One input event for menu_popup.step, or None on timeout, or "resize"."""
-    try:
-        got = screen.get_wch()
-    except curses.error:
-        return None
-    if isinstance(got, str):
-        return ("key", CHAR_KEYS[got]) if got in CHAR_KEYS else ("char", got)
-    if got == curses.KEY_RESIZE:
-        return "resize"
-    if got == curses.KEY_MOUSE:
+    """One input event for menu_popup.step, or None on timeout, or "resize". A mouse report that is
+    not a click, such as the release after a held press, is no event at all and is read past."""
+    while True:
         try:
-            _, x, y, _, _ = curses.getmouse()
+            got = screen.get_wch()
         except curses.error:
             return None
-        return ("mouse", (x, y))
-    return ("key", KEY_NAMES.get(got, "other"))
+        if isinstance(got, str):
+            return ("key", CHAR_KEYS[got]) if got in CHAR_KEYS else ("char", got)
+        if got == curses.KEY_RESIZE:
+            return "resize"
+        if got == curses.KEY_MOUSE:
+            spot = menu_curses.click()
+            if spot:
+                return ("mouse", spot)
+            continue
+        return ("key", KEY_NAMES.get(got, "other"))
 
 
 def run(screen, key):
     colour = menu_curses.setup(screen)
     glyphs = menu_style.glyphs()
     screen.timeout(RELOAD_MS)
-    state, note = menu_popup.State(), ""
+    state, note, stale = menu_popup.State(), "", ""
     loaded = load(key)
     while not state.close:
-        agent, parent_name, recent, reply = loaded
+        agent, parent_name, recent, reply, errors = loaded
         height, width = screen.getmaxyx()
         columns = width - 1
         screen.erase()
         if not agent:
-            menu_curses.put(screen, 1, 2, "This agent is no longer listed. Press any key.")
+            gone = ("The agent list could not be read (" + "; ".join(errors) + ")." if errors
+                    else "This agent is no longer listed.")
+            menu_curses.put(screen, 1, 2, menu_render.fit(gone + " Press any key.", max(columns - 2, 1)))
             screen.noutrefresh()
             curses.doupdate()
             screen.timeout(-1)
             read_event(screen)
             return
         offered, spots = menu_detail.buttons(agent), []
-        if menu_render.too_small(height, width) or height < 9:
+        small = menu_render.too_small(height, width) or height < 9
+        if small:
             menu_curses.put(screen, 0, 0, "too small")
         else:
             menu_curses.put(screen, 0, 2, menu_render.fit(menu_detail.title(agent, parent_name), columns - 4,
@@ -126,8 +142,8 @@ def run(screen, key):
                 hint = "Enter send · Esc stop typing"
             else:
                 hint = "Tab next button · Enter press · i instruction · PgUp PgDn scroll · Esc close"
-            menu_curses.put(screen, height - 1, 2, menu_render.fit(note or hint, columns - 4, glyphs["ellipsis"]),
-                            curses.A_BOLD if note else curses.A_DIM)
+            menu_curses.put(screen, height - 1, 2, menu_render.fit(note or stale or hint, columns - 4, glyphs["ellipsis"]),
+                            curses.A_BOLD if note or stale else curses.A_DIM)
             menu_curses.cursor(state.typing)
             if state.typing:
                 screen.move(height - 5, 4 + min(menu_render.width(state.text), field - 1))
@@ -136,10 +152,16 @@ def run(screen, key):
 
         event = read_event(screen)
         if event is None:
-            loaded = load(key)                              # reload only when idle, never per keystroke
+            loaded, stale = reload(key, loaded)             # reload only when idle, never per keystroke
             continue
         if event == "resize":
             curses.update_lines_cols()
+            continue
+        if small:
+            # Nothing is drawn but "too small": no buttons, no instruction line, no confirm hint. A key
+            # here would act blind, so only closing is possible until the popup is big enough again.
+            if event in (("key", "esc"), ("char", "q")):
+                return
             continue
         if event[0] == "mouse":
             x, y = event[1]
@@ -171,7 +193,7 @@ def run(screen, key):
         curses.flushinp()                                   # the rest of a paste must not run as hotkeys
         if close:
             return
-        loaded = load(key)
+        loaded, stale = reload(key, loaded)
 
 
 def main(argv):
@@ -180,11 +202,14 @@ def main(argv):
                         help="print the popup's content as plain text and exit. Offers no actions")
     parser.add_argument("key", help='agent key from the sidebar, "<kind>:<session id>"')
     args = parser.parse_args(argv)
-    locale.setlocale(locale.LC_ALL, "")
+    try:
+        locale.setlocale(locale.LC_ALL, "")
+    except locale.Error:
+        pass  # the environment names a locale that is not installed: run in the default one, not crash
     if args.as_text:
-        agent, parent_name, recent, reply = load(args.key)
+        agent, parent_name, recent, reply, errors = load(args.key)
         if not agent:
-            print("agent-menu-detail: no such agent", file=sys.stderr)
+            print("agent-menu-detail: no such agent" + (f" ({'; '.join(errors)})" if errors else ""), file=sys.stderr)
             return 3
         print(menu_detail.title(agent, parent_name))
         for line, _ in menu_detail.body(agent, recent, reply, 96, menu_style.glyphs()):

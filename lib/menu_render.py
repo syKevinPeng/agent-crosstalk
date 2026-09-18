@@ -162,6 +162,16 @@ def rows(snapshot, columns, collapsed=(), glyphs=None, frame=0, tier=None):
     tier = tier or tier_for(columns)
     kind_columns = kind_width(snapshot)
     mark_columns = max([width(mark(a, glyphs, frame)) for a in snapshot.by_key.values()] or [1])
+
+    def spare(tier):
+        """Columns left for indentation once a row holds its lead, fold, a 4-cell name, the gap, the
+        columns on the right and the held-back last cell. Below zero the row cannot fit at all."""
+        right = {"narrow": mark_columns, "normal": kind_columns + 1 + mark_columns,
+                 "wide": kind_columns + 2 + FOLDER_COLUMNS + 2 + MODEL_COLUMNS + 1 + mark_columns}[tier]
+        return columns - (1 + 2 + 4 + 1 + right + 1)
+    if tier == "wide" and spare("wide") < 0:
+        tier = "normal"          # no room for the folder and model: drop them, never the mark at the end
+    indent_room = max(spare(tier) // 2, 0)
     out = [{"text": fit(header(snapshot, columns, glyphs), columns, glyphs["ellipsis"]),
             "key": "", "style": "header", "mark": "", "look": ""}]
     for error in snapshot.errors:
@@ -195,7 +205,7 @@ def rows(snapshot, columns, collapsed=(), glyphs=None, frame=0, tier=None):
         if depth == 0:
             add(agent, " ", (glyphs["closed"] if folded else glyphs["open"]) if agent.children else glyphs["leaf"])
         else:
-            levels = min(depth, MAX_INDENT, max((columns - 22) // 2, 0))   # a narrow pane indents less
+            levels = min(depth, MAX_INDENT, max((columns - 22) // 2, 0), indent_room)   # a narrow pane indents less
             add(agent, " " + "  " * levels, glyphs["last"] if last else glyphs["branch"])
         if not folded:
             for index, child in enumerate(agent.children):

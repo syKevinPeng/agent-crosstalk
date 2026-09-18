@@ -1,10 +1,13 @@
 """Tests for the popup's key handling, which is a pure state machine with a clock passed in."""
+import curses
 import sys
 import unittest
+from unittest import mock
 
 from menu_fixtures import LIB
 
 sys.path.insert(0, str(LIB))
+import menu_curses  # noqa: E402
 from menu_popup import SETTLE, State, after_action, cancel, step  # noqa: E402
 
 ALL = ["Open pane", "Send", "Retire"]
@@ -149,6 +152,14 @@ class PopupTest(unittest.TestCase):
         state, _ = play(ALL, events)
         self.assertEqual((state.text, state.pasted), ("", False))
 
+    def test_enter_after_the_instruction_line_was_withdrawn_sends_nothing(self):
+        """A reload can take Send away while the line is open: the agent was retired, or now waits on a
+        prompt. The Enter meant for the line then only closes it."""
+        state, actions = play(ALL, chars("i") + chars("hello"))
+        self.assertEqual((actions, state.typing), ([], True))
+        state, actions = play(["Open pane", "Retire"], [("key", "enter")], state=state, start=200.0)
+        self.assertEqual((actions, state.typing, state.text), ([], False, "hello"))
+
     def test_send_needs_text_and_keeps_it_when_refused(self):
         state, actions = play(ALL, [("key", "tab"), ("key", "enter")])     # focus Send, press it, no text
         self.assertEqual((actions, state.typing), ([], True))
@@ -165,6 +176,15 @@ class PopupTest(unittest.TestCase):
         self.assertTrue(play(ALL, [("key", "esc")], state=state)[0].close)
         self.assertTrue(play(ALL, chars("q"))[0].close)
         self.assertEqual(play(["Open pane"], chars("i"))[0].typing, False)  # no Send, no typing
+
+    def test_only_a_press_or_a_click_counts_as_a_click(self):
+        """After a press held longer than a click, ncurses reports the release on its own at the next
+        input, such as a wheel turn. Taken for a second click, it confirmed an armed Retire."""
+        for bstate, expected in ((curses.BUTTON1_CLICKED, (4, 21)), (curses.BUTTON1_PRESSED, (4, 21)),
+                                 (curses.BUTTON1_RELEASED, None), (0, None)):
+            with self.subTest(bstate=bstate), \
+                    mock.patch.object(menu_curses.curses, "getmouse", return_value=(0, 4, 21, 0, bstate)):
+                self.assertEqual(menu_curses.click(), expected)
 
     def test_focus_wraps_and_scroll_never_goes_negative(self):
         self.assertEqual(play(ALL, [("key", "tab")] * 4)[0].focus, 1)

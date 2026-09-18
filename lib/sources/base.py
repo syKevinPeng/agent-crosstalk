@@ -31,10 +31,10 @@ def read_jsonl(path):
     for line in lines:
         try:
             record = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):   # RecursionError: a line nested thousands of levels deep
             continue
         if isinstance(record, dict):
-            # Any agent can append a line. Keep only plain values, so a well-formed line with a list
-            # or a number where text belongs cannot crash every reader from then on.
-            records.append({k: v for k, v in record.items() if isinstance(v, (str, bool)) or v is None})
+            # Any agent can append a line. Keep only text and null, so a well-formed line with a
+            # boolean, a number or a list where text belongs cannot crash every reader from then on.
+            records.append({k: v for k, v in record.items() if isinstance(v, str) or v is None})
     return records
