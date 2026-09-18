@@ -2,7 +2,7 @@
 """retire-peer: archive or stop an agent that bin/spawn-peer created. It refuses ids
 with no spawn record and sessions whose name or folder no longer match that record.
 Permanent deletion needs --delete plus --approval.
-See ../README.md, section "Creating and retiring agents"."""
+See ../docs/reference.md, "Creating and retiring agents"."""
 import argparse
 import json
 import os

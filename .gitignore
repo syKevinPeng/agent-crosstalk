@@ -1,9 +1,12 @@
 # Local records. They hold session names, ids, folders and message summaries.
 log/
-# Local planning and review history. It names real sessions and folders.
-docs/
+# Local planning and review history names real sessions and folders, so docs/ is private except for
+# the public reference.
+docs/*
+!docs/reference.md
 __pycache__/
 *.pyc
+.venv/
 # Git worktrees and explorations live inside the project but are never committed.
 .worktrees/
 explore/

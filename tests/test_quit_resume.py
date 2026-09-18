@@ -309,7 +309,7 @@ class QuitResumeTest(unittest.TestCase):
         self.assertEqual(len(self.daemon.params("thread/archive")), 2)
 
     def test_an_agent_brought_back_by_hand_counts_as_running(self):
-        """The README tells the owner that `claude attach` undoes a retire. That leaves no record, so a
+        """The reference tells you that `claude attach` undoes a retire. That leaves no record, so a
         running session must win over the record: buttons, a row that stays, and Quit working again."""
         self.spawned("claude", "busy one", LIVE_CLAUDE[:8])
         self.m.log("spawned.jsonl", {"event": "retired", "kind": "claude", "id": LIVE_CLAUDE[:8], "action": "stop",

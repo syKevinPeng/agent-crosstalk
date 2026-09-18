@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """codex-reply: print what a Codex agent said in its latest turn. Read-only.
 This is how the creator of a spawned Codex agent gets its answer: the agent needs no
-permission to reply, because nothing is sent. See ../README.md, "Creating and retiring agents"."""
+permission to reply, because nothing is sent. See ../docs/reference.md, "Creating and retiring agents"."""
 import argparse
 import os
 import sys

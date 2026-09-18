@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """agent-menu: a tmux sidebar that shows every Claude and Codex agent on this machine, who spawned
 whom, and who is waiting for you. Click a row or press Enter for the detail popup.
-Refreshing reads local state only and spends no tokens. See ../README.md, "Agent menu"."""
+Refreshing reads local state only and spends no tokens. See ../docs/reference.md, "Agent menu"."""
 import argparse
 import curses
 import locale

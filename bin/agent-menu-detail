@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """agent-menu-detail: the popup for one agent. Shows what it waits on, its spawned agents and its
 recent messages, and lets the owner open its pane, attach, send an instruction or retire it.
-The actions run only from this interactive screen. See ../README.md, "Agent menu"."""
+The actions run only from this interactive screen. See ../docs/reference.md, "Agent menu"."""
 import argparse
 import curses
 import locale

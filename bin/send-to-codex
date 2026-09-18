@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # send-to-codex: queue a teammate message for a Codex CLI session, check that a turn takes it,
-# then log it. Wraps `codex queue` (checked against codex-cli 0.154.0). See ../README.md.
+# then log it. Wraps `codex queue` (checked against codex-cli 0.154.0). See ../docs/reference.md.
 set -euo pipefail
 
 usage() {
