@@ -21,9 +21,8 @@ import zoneinfo
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from codex_ws import CodexError, CodexWS  # noqa: E402
 
-from .base import SourceError  # noqa: E402
+from .base import SourceError, usage_folder  # noqa: E402
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 # "Current week (Fable): 16% used · resets Sep 24, 1pm (America/New_York)"
 USAGE_LINE = re.compile(r"^Current (session|week)(?: \(([^)]{1,40})\))?: (\d{1,3})% used(?: . resets (.{1,60}))?$")
 RESET_ZONE = re.compile(r"^(.{1,40}?)\s*\(([A-Za-z_/+-]{1,40})\)\s*$")
@@ -31,7 +30,7 @@ RESET_ZONE = re.compile(r"^(.{1,40}?)\s*\(([A-Za-z_/+-]{1,40})\)\s*$")
 
 def usage_cwd():
     """Where the Claude call runs, so its transcripts collect in one corner of their own."""
-    folder = os.environ.get("AGENT_MENU_USAGE_CWD") or os.path.join(ROOT, "log", "usage-calls")
+    folder = usage_folder()
     os.makedirs(folder, exist_ok=True)
     return folder
 

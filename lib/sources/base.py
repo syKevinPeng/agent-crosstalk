@@ -7,6 +7,12 @@ class SourceError(Exception):
     """A source could not be read. The menu shows `?` for its rows instead of stale marks."""
 
 
+def usage_folder():
+    """The folder the menu's own `claude -p /usage` call runs in. A session there is that call, not an agent."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+    return os.environ.get("AGENT_MENU_USAGE_CWD") or os.path.join(root, "log", "usage-calls")
+
+
 def clean(text):
     """Text chosen by another agent (a session name, a folder, a message line) is untrusted. Control
     characters, escape sequences, newlines, tabs and invisible format characters such as the

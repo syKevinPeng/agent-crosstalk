@@ -82,6 +82,20 @@ class QuitResumeTest(unittest.TestCase):
         parked = [s for s in claude_src.list_sessions(include_quit=True) if s["session_id"] == DONE_CLAUDE]
         self.assertEqual(parked[0]["pid"], None)
 
+    def test_the_menus_own_usage_call_is_not_an_agent(self):
+        """The limits block runs `claude -p /usage` in a folder of its own. While it runs, and after it
+        ends, the CLI lists it like any session, so it would flicker into the tree as a working agent."""
+        folder = os.path.join(self._tmp.name, "usage-calls")
+        os.makedirs(folder)
+        os.environ["AGENT_MENU_USAGE_CWD"] = folder
+        self.m.claude_session("cccccccc-0000-4000-8000-000000000003", "usage-calls-78", 700, status="busy", cwd=folder)
+        self.m.quit_claude_session("dddddddd-0000-4000-8000-000000000004", "usage-calls-77", cwd=folder + "/")
+        self.m.write()
+        names = [s["name"] for s in claude_src.list_sessions(include_quit=True)]
+        self.assertNotIn("usage-calls-78", names)
+        self.assertNotIn("usage-calls-77", names)
+        self.assertIn("busy one", names)
+
     def test_quit_agents_never_count_in_the_header(self):
         self.m.log("messages.jsonl", {"channel": "codex queue", "thread_uuid": ARCHIVED_CODEX, "msg_id": "m1",
                                       "result": "queued", "first_line": "x"})

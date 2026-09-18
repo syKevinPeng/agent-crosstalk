@@ -4,7 +4,7 @@ import os
 import subprocess
 import time
 
-from .base import SourceError, clean
+from .base import SourceError, clean, usage_folder
 
 STATES = {"busy": "working", "idle": "idle", "waiting": "needs_owner"}
 # Each `claude` start costs about a tenth of a second of CPU, and the listing is read every two
@@ -28,10 +28,13 @@ def _listing(extra_args=(), timeout=1.5):
     except ValueError:
         raise SourceError("claude: output is not JSON") from None
     sessions, seen = [], set()
+    own = os.path.realpath(usage_folder())
     for entry in data if isinstance(data, list) else []:
         if not isinstance(entry, dict) or not isinstance(entry.get("sessionId"), str) or entry["sessionId"] in seen:
             continue
         text = {k: entry.get(k) if isinstance(entry.get(k), str) else "" for k in ("id", "name", "cwd")}
+        if text["cwd"] and os.path.realpath(text["cwd"]) == own:
+            continue                                  # the menu's own usage call, which lasts a second or two
         seen.add(entry["sessionId"])
         status = entry.get("status")
         state = STATES.get(status, "unknown") if isinstance(status, str) else "unknown"
