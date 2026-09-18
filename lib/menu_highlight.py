@@ -24,7 +24,7 @@ WINDOW_MARK = "@agent_menu_highlight_window"
 COND_PREFIX = f"#{{?#{{{MARK}}},"                              # how a border style of ours starts
 TINTS = ("window-style", "window-active-style")               # pane options
 BORDERS = ("pane-border-style", "pane-active-border-style")   # window options
-DEFAULT_BG, DEFAULT_BORDER = "colour236", "brightcyan"
+DEFAULT_BG, DEFAULT_FG, DEFAULT_BORDER = "colour236", "colour252", "brightcyan"
 # A colour name, colourNNN, or #rrggbb: nothing that could add style attributes or a tmux format.
 COLOUR = re.compile(r"^(?:[A-Za-z]+[0-9]{0,3}|#[0-9A-Fa-f]{6})$")
 
@@ -41,8 +41,10 @@ def _colour(name, default):
 
 def styles():
     bg = _colour("AGENT_MENU_HIGHLIGHT_BG", DEFAULT_BG)
+    fg = _colour("AGENT_MENU_HIGHLIGHT_FG", DEFAULT_FG)   # the text colour on the tint, so a light theme stays readable
     border = _colour("AGENT_MENU_HIGHLIGHT_BORDER", DEFAULT_BORDER)
-    return {"window-style": f"bg={bg}", "window-active-style": f"bg={bg}",
+    tint = f"bg={bg},fg={fg}"
+    return {"window-style": tint, "window-active-style": tint,
             "pane-border-style": f"fg={border}", "pane-active-border-style": f"fg={border},bold"}
 
 

@@ -123,10 +123,13 @@ def _run(screen, highlighter):
     limits = LimitsPoller()
     limits.start()
     selected, collapsed, note, frame, top = "", set(), "", 0, 0
+    limits_asked_at = None
     while True:
         height, full_width = screen.getmaxyx()
         columns = full_width - 1  # never write the last column: some terminals wrap there
         snapshot = poller.snapshot
+        if note == "updating limits…" and limits.taken_at != limits_asked_at:
+            note = ""                                  # the reading arrived: the note has done its job
         frame += 1 if moving else 0
         screen.erase()
         if menu_render.too_small(height, full_width):
@@ -200,7 +203,7 @@ def _run(screen, highlighter):
             poller.wake.set()
             continue
         if pressed in (ord("u"), ord("U")):
-            note = "updating limits…"
+            note, limits_asked_at = "updating limits…", limits.taken_at
             limits.wake.set()
             continue
         if not snapshot:

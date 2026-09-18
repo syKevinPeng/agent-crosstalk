@@ -75,7 +75,7 @@ def open_messages():
 
 
 def recent(agent_id, agent_name, limit=4):
-    """The last few messages to this agent (`→`) and from it (`←`), oldest first."""
+    """The last few messages to this agent (direction `out`) and from it (`in`), oldest first."""
     records = read_jsonl(messages_path())
     received = {r.get("msg_id") for r in records if r.get("channel") == "receipt"}
     wanted = normalise(agent_name)
@@ -87,6 +87,6 @@ def recent(agent_id, agent_name, limit=4):
         from_it = bool(wanted) and normalise(record.get("sender")) == wanted
         if to_it or from_it:
             sent = parse_time(record.get("time_utc"))          # a forged time is no text at all, only "?"
-            rows.append({"direction": "→" if to_it else "←", "time": sent.astimezone().strftime("%H:%M") if sent else "?",
+            rows.append({"direction": "out" if to_it else "in", "time": sent.astimezone().strftime("%H:%M") if sent else "?",
                          "text": clean(record.get("first_line")), "receipt": record["msg_id"] in received})
     return rows[-limit:]

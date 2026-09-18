@@ -2,6 +2,7 @@
 import os
 import time
 import unicodedata
+from dataclasses import replace as dataclass_replace
 
 import menu_style
 
@@ -18,14 +19,14 @@ HINT_FULL = " ⏎ open  ←→ fold  w wide  u limits  ? help"
 HINT_SHORT = " ⏎ open  u limits  ? help"
 HINT_ASCII = " Enter open  u limits  ? help"
 # Every help line fits the narrowest sidebar (32 cells) and the list fits 12 rows, so nothing is cut.
-HELP = ["KEYS", "↑ ↓  j k   move", "→         open, then first child", "←         fold, then to parent",
-        "Space     fold or unfold", "Home End  first, last", "Enter     open detail popup",
-        "u         update limits", "w         wide or narrow", "a         show quit agents",
-        "?  help    q  quit", "Press any key."]
-HELP_ASCII = ["KEYS", "up down j k   move", "right     open, then first child", "left      fold, then to parent",
-              "Space     fold or unfold", "Home End  first, last", "Enter     open detail popup",
-              "u         update limits", "w         wide or narrow", "a         show quit agents",
-              "?  help    q  quit", "Press any key."]
+HELP = ["KEYS  (mouse: click to open)", "↑ ↓ j k    move", "→ l open   ← h fold or parent",
+        "Space fold  Home End g G jump", "Enter popup   a quit agents", "u limits   w width   q quit",
+        "MARKS", "✗ login   !n prompt   ✉n unread", "⠋ working   ✓ idle   ? no state", "- stopped or quit",
+        "", "Press any key."]
+HELP_ASCII = ["KEYS  (mouse: click to open)", "up down j k  move", "right l open  left h fold/parent",
+              "Space fold  Home End g G jump", "Enter popup   a quit agents", "u limits   w width   q quit",
+              "MARKS", "X login   !n prompt   +n unread", "* working   . idle   ? no state", "- stopped or quit",
+              "", "Press any key."]
 MAX_INDENT = 4
 
 
@@ -111,7 +112,16 @@ def status(agent):
         return "needs"
     if agent.open_messages:
         return "unanswered"
-    return agent.state if agent.state in ("working", "idle") else "stopped"
+    if agent.state in ("working", "idle"):
+        return agent.state
+    if agent.state == "unknown" and not agent.quit:
+        return "running"     # alive, but its CLI reports no state, as for a Claude session in a terminal
+    return "stopped"
+
+
+def activity(agent):
+    """What the agent is doing, leaving aside prompts and unread messages."""
+    return status(dataclass_replace(agent, auth="", needs_owner=0, open_messages=0))
 
 
 def mark(agent, glyphs=None, frame=0):
@@ -333,6 +343,10 @@ def move(snapshot, collapsed, selected, action):
     """Tree keys after the WAI-ARIA tree pattern. Returns (selected, collapsed)."""
     collapsed = set(collapsed)
     visible = [r["key"] for r in rows(snapshot, 200, collapsed) if r["key"]]
+    if selected not in visible and action == "stay" and selected:
+        # A row can vanish for one refresh, when a CLI is slow. "stay" keeps the key, so the selection
+        # and the pane highlight do not jump to the first row. A move starts again from the top.
+        return selected, collapsed
     if not visible:
         return "", collapsed
     if selected not in visible:

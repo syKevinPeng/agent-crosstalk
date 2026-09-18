@@ -38,6 +38,10 @@ class State:
     armed_at: float = 0.0    # when `confirm` was set
     last_at: float = -1.0    # when the previous event arrived
     pasted: bool = False     # some of `text` arrived as a paste
+    held: str = ""           # why the last key did nothing, when it was held back for safety
+
+HELD_PASTE = "that looked pasted: press Enter again in a moment"
+HELD_SOON = "too quick: arm it, wait a moment, then confirm"
 
 
 def _press(state, button, now, confirming=False):
@@ -51,7 +55,8 @@ def _press(state, button, now, confirming=False):
         if confirming and state.confirm == button and now - state.armed_at >= SETTLE:
             return dataclasses.replace(state, confirm=""), button
         if state.confirm == button:
-            return dataclasses.replace(state, confirm=""), ""   # too soon, or pressed again: disarm
+            held = HELD_SOON if confirming else ""
+            return dataclasses.replace(state, confirm="", held=held), ""   # too soon, or pressed again: disarm
         return dataclasses.replace(state, confirm=button, armed_at=now), ""
     return dataclasses.replace(state, confirm=""), button
 
@@ -59,8 +64,13 @@ def _press(state, button, now, confirming=False):
 def step(state, offered, event, page=10, now=0.0):
     """`now` is a monotonic clock in seconds. Tests pass their own."""
     since = now - state.last_at if state.last_at >= 0 else float("inf")
-    state = dataclasses.replace(state, last_at=now)
+    previous = state.last_at
+    state = dataclasses.replace(state, last_at=now, held="")
     state, action = _step(state, offered, event, page, now, since < BURST, since)
+    if state.held == HELD_PASTE:
+        # The wait runs from the last key typed. An Enter held back is not typed text, so it does not
+        # start the wait again: a person who presses Enter twice gets the second one.
+        state = dataclasses.replace(state, last_at=previous)
     if not state.text:
         state = dataclasses.replace(state, pasted=False)       # an emptied line starts clean
     return state, action
@@ -84,7 +94,7 @@ def _step(state, offered, event, page, now, burst, since):
             return dataclasses.replace(state, typing=False), ""
         if (kind, value) == ("key", "enter"):
             if burst or (state.pasted and since < SETTLE):
-                return state, ""                                # a paste cannot send itself
+                return dataclasses.replace(state, held=HELD_PASTE), ""   # a paste cannot send itself
             return _press(state, "Send", now)
         if (kind, value) == ("key", "backspace"):
             return dataclasses.replace(state, text=state.text[:-1]), ""

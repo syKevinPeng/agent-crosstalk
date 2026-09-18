@@ -7,6 +7,11 @@ class SourceError(Exception):
     """A source could not be read. The menu shows `?` for its rows instead of stale marks."""
 
 
+class SourceAbsent(SourceError):
+    """The CLI behind a source is not installed or not running at all. That is no error to show:
+    someone who uses only Claude, or only Codex, sees just their own agents."""
+
+
 def usage_folder():
     """The folder the menu's own `claude -p /usage` call runs in. A session there is that call, not an agent."""
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))

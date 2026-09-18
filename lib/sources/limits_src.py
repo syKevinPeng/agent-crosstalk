@@ -14,15 +14,16 @@ import datetime
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import zoneinfo
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-from codex_ws import CodexError, CodexWS  # noqa: E402
+from codex_ws import CodexError, CodexWS, sock_path  # noqa: E402
 
 import private_log  # noqa: E402
-from .base import SourceError, usage_folder  # noqa: E402
+from .base import SourceAbsent, SourceError, usage_folder  # noqa: E402
 
 # "Current week (Fable): 16% used · resets Sep 24, 1pm (Europe/Berlin)"
 USAGE_LINE = re.compile(r"^Current (session|week)(?: \(([^)]{1,40})\))?: (\d{1,3})% used(?: . resets (.{1,60}))?$")
@@ -30,20 +31,8 @@ RESET_ZONE = re.compile(r"^(.{1,40}?)\s*\(([A-Za-z_/+-]{1,40})\)\s*$")
 
 
 def usage_cwd():
-    """Where the Claude call runs, so its transcripts collect in one corner of their own."""
+    """Where the Claude call runs: a private folder, which the listing leaves out as the menu's own call."""
     return private_log.private_folder(usage_folder())
-
-
-def short_delta(seconds):
-    """Seconds until a reset, as something that fits a narrow column."""
-    if seconds is None:
-        return ""
-    if seconds <= 0:
-        return "now"
-    for size, suffix in ((86400, "d"), (3600, "h"), (60, "m")):
-        if seconds >= size:
-            return f"{int(seconds // size)}{suffix}"
-    return "now"
 
 
 def window_name(minutes):
@@ -58,6 +47,29 @@ def window_name(minutes):
     return f"{int(minutes)}m"
 
 
+MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct",
+                                       "nov", "dec"), start=1)}
+ENGLISH_TIME = re.compile(r"^([A-Za-z]{3})[a-z]* (\d{1,2}), (\d{1,2})(?::(\d{2}))?\s*([AaPp][Mm])?$")
+
+
+def _english_time(text):
+    """'Sep 24, 1pm' or 'Sep 24, 13:00' -> a naive datetime in 1900, or None. By hand, not with
+    strptime, whose month and am/pm names follow the locale: under zh_CN every reset time was lost."""
+    found = ENGLISH_TIME.match(text.strip())
+    if not found or found.group(1).lower() not in MONTHS:
+        return None
+    month, day, hour, minute, half = found.groups()
+    hour, minute = int(hour), int(minute or 0)
+    if half:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if half.lower() == "pm" else 0)
+    try:
+        return datetime.datetime(1900, MONTHS[month.lower()], int(day), hour, minute)
+    except ValueError:
+        return None
+
+
 def parse_reset(text, now=None):
     """'Sep 24, 1pm (Europe/Berlin)' -> seconds from now, or None when it cannot be read."""
     found = RESET_ZONE.match(text or "")
@@ -68,13 +80,7 @@ def parse_reset(text, now=None):
         tz = zoneinfo.ZoneInfo(zone)
     except Exception:
         return None
-    stamp = None
-    for pattern in ("%b %d, %I:%M%p", "%b %d, %I%p", "%b %d, %H:%M"):
-        try:
-            stamp = datetime.datetime.strptime(when.strip().upper().replace("AM", "AM").replace("PM", "PM"), pattern)
-            break
-        except ValueError:
-            continue
+    stamp = _english_time(when)
     if stamp is None:
         return None
     here = (now or datetime.datetime.now(datetime.timezone.utc)).astimezone(tz)
@@ -93,6 +99,8 @@ def claude_limits(timeout=25, now=None):
         done = subprocess.run([binary, "-p", "--output-format", "json", "--safe-mode", "--no-session-persistence",
                                "--setting-sources", "user", "/usage"],
                               cwd=usage_cwd(), capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        raise SourceAbsent("claude: not installed") from None
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise SourceError(f"claude: {type(exc).__name__}") from None
     if done.returncode != 0:
@@ -120,6 +128,10 @@ def claude_limits(timeout=25, now=None):
 def codex_limits(timeout=10, now=None):
     """[{source, window, model, percent, resets_in}] from the Codex daemon."""
     seconds_now = (now or datetime.datetime.now(datetime.timezone.utc)).timestamp()
+    if not os.path.exists(sock_path()):
+        if not shutil.which(os.environ.get("CODEX_BIN") or "codex"):
+            raise SourceAbsent("codex: not installed")
+        raise SourceError("codex: daemon not running")
     try:
         ws = CodexWS(timeout=timeout)
         try:
@@ -154,6 +166,8 @@ def read_all(now=None):
     for reader in (claude_limits, codex_limits):
         try:
             limits.extend(reader(now=now))
+        except SourceAbsent:
+            pass                                      # that CLI is not installed: nothing to report
         except SourceError as exc:
             errors.append(str(exc))
         except Exception as exc:                      # a limits block must never end the menu

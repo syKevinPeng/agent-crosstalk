@@ -5,7 +5,7 @@ import re
 
 import auth_readers
 from sources import claude_src, codex_src, logs_src, tmux_src
-from sources.base import SourceError, clean
+from sources.base import SourceAbsent, SourceError, clean
 
 RETIRED_VISIBLE = datetime.timedelta(minutes=10)
 QUESTIONS = re.compile(r"\?\s+(\d+) questions?\b")
@@ -42,6 +42,7 @@ class Agent:
     pane_id: str = ""             # tmux %id, only when the match is certain
     maybe_in_pane: bool = False   # some pane could be showing it, certain or not: no Quit from the menu
     pane_pid: int = 0
+    _title: str = dataclasses.field(default="", repr=False)   # the pane's title, read for Codex prompts
     retired: bool = False
     source_error: bool = False
     children: list = dataclasses.field(default_factory=list)
@@ -202,8 +203,10 @@ def collect(now=None, include_quit=False):
                           ("codex", lambda: codex_src.list_threads(extra_ids=codex_ids, include_quit=include_quit))):
         try:
             raw.extend(reader())
-        except SourceError:
-            errors.append(f"{label}: unreachable")
+        except SourceAbsent:
+            pass                                  # that CLI is not installed or running: nothing to show
+        except SourceError as exc:
+            errors.append(str(exc) if str(exc).startswith(label) else f"{label}: unreachable")
     try:
         panes = tmux_src.list_panes()
     except SourceError:

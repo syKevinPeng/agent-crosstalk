@@ -1,11 +1,13 @@
 """Codex threads, from the local app-server daemon."""
 import os
+import shutil
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from codex_ws import CodexError, CodexWS  # noqa: E402
 
-from .base import SourceError, clean  # noqa: E402
+from .base import SourceAbsent, SourceError, clean  # noqa: E402
+from codex_ws import sock_path  # noqa: E402
 
 STATES = {"active": "working", "idle": "idle", "notLoaded": "stopped"}
 # An active thread that is blocked on the owner says so in its status (codex-cli 0.154.0 ThreadStatus:
@@ -29,6 +31,10 @@ def _thread(raw):
 
 
 def list_threads(extra_ids=(), timeout=1.5, include_quit=False):
+    if not os.path.exists(sock_path()):
+        if not shutil.which(os.environ.get("CODEX_BIN") or "codex"):
+            raise SourceAbsent("codex: not installed")          # a Claude-only setup: nothing to say
+        raise SourceError("codex: daemon not running")
     """Listed threads, plus `extra_ids` read one by one. A thread that `spawn-peer` just created
     is missing from the listing until its first turn, so the caller passes recorded ids here.
     With `include_quit`, archived threads are added too, marked quit: archiving is how a Codex
@@ -46,7 +52,10 @@ def list_threads(extra_ids=(), timeout=1.5, include_quit=False):
         # live listing lacks is looked up in the archived listing first: only there does it show as quit.
         missing = [i for i in extra_ids if i not in threads]
         if include_quit or missing:
-            archived = ws.rpc("thread/list", {"limit": 200, "archived": True}).get("data")
+            try:
+                archived = ws.rpc("thread/list", {"limit": 200, "archived": True}).get("data")
+            except CodexError:
+                archived = []            # the quit list is missing, the live threads still stand
             for raw in archived if isinstance(archived, list) else []:
                 if isinstance(raw, dict) and isinstance(raw.get("id"), str) and raw["id"] not in threads \
                         and (include_quit or raw["id"] in missing):

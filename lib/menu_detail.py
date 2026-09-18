@@ -8,7 +8,7 @@ import menu_style
 
 SHORT_ID = re.compile(r"[0-9a-f]{6,32}")
 LABELS = {"auth": "needs login", "needs": "needs you", "unanswered": "unanswered",
-          "working": "working", "idle": "idle", "stopped": "stopped"}
+          "working": "working", "idle": "idle", "stopped": "stopped", "running": "running, no state reported"}
 
 
 def short_path(path):
@@ -105,12 +105,13 @@ def can_instruct(agent):
     return agent.kind == "codex"
 
 
-def title(agent, parent_name):
+def title(agent, parent_name, glyphs=None):
+    dot = (glyphs or menu_style.UNICODE)["separator"]
     origin = f"spawned by: {parent_name}" if parent_name else ("spawned" if agent.spawned else "started by you")
     if agent.quit:
-        origin += " · quit"
-    access = f" · {agent.access}" if agent.access else ""
-    return f"{agent.name} · {agent.kind}{access} · {short_path(agent.cwd)} · {origin}"
+        origin += f"{dot}quit"
+    access = f"{dot}{agent.access}" if agent.access else ""
+    return f"{agent.name}{dot}{agent.kind}{access}{dot}{short_path(agent.cwd)}{dot}{origin}"
 
 
 def _wrapped(text, columns, style, indent="  "):
@@ -149,7 +150,12 @@ def body(agent, recent, reply, columns, glyphs=None):
             where = "It runs in no pane: attach it to read and answer it."
         out += _wrapped(f"This agent is waiting for an answer from you. {where}", columns, "warn")
     else:
-        out.append((f"STATE      {LABELS[menu_render.status(agent)]}", "head"))
+        state = menu_render.status(agent)
+        if state == "unanswered":                  # unread messages must not hide what it is doing
+            state_text = f"{LABELS[menu_render.activity(agent)]}{glyphs['separator']}{agent.open_messages} unanswered"
+        else:
+            state_text = LABELS[state]
+        out.append((f"STATE      {state_text}", "head"))
     if agent.children:
         out.append(("", "blank"))
         for index, child in enumerate(agent.children):
@@ -160,9 +166,11 @@ def body(agent, recent, reply, columns, glyphs=None):
     if recent:
         out.append(("", "blank"))
         for index, row in enumerate(recent):
-            receipt = f"  receipt {glyphs['idle']}" if row["receipt"] else ("  no receipt yet" if row["direction"] == "→" else "")
+            outgoing = row["direction"] in ("out", "→")
+            receipt = f"  receipt {glyphs['idle']}" if row["receipt"] else ("  no receipt yet" if outgoing else "")
             lead = "RECENT     " if index == 0 else "           "
-            text = f"{lead}{row['direction']} {row['time']} \"{row['text']}\""
+            arrow = glyphs["arrow_out"] if outgoing else glyphs["arrow_in"]
+            text = f"{lead}{arrow} {row['time']} \"{row['text']}\""
             out.append((menu_render.fit(text, columns - menu_render.width(receipt), glyphs["ellipsis"]) + receipt, "plain"))
     if reply:
         out += [("", "blank"), ("LATEST ANSWER", "head")]

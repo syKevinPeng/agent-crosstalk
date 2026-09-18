@@ -580,11 +580,11 @@ class AgentMenuTest(unittest.TestCase):
         self.m.claude_session(CLAUDE_A, "reviewer", 500)
         self.codex_thread(CODEX_P, "builder")
         lines = self.tree(STUB_CLAUDE_FAIL="1")
-        self.assertIn(" claude: unreachable", lines)
+        self.assertIn(" claude: exit 7", lines)
         self.assertFalse(any("reviewer" in l for l in lines))
         self.assertTrue(any("builder" in l for l in lines))
         lines = self.tree(CODEX_APP_SERVER_SOCK=self.m.sock + ".none", STUB_TMUX_FAIL="1")
-        self.assertIn(" codex: unreachable", lines)
+        self.assertIn(" codex: daemon not running", lines)      # Codex is installed, its daemon is gone
         self.assertIn(" tmux: unreachable", lines)
         self.assertTrue(any("reviewer" in l for l in lines))
 

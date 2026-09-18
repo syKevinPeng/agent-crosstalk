@@ -55,14 +55,6 @@ def list_panes():
     return list(panes.values())
 
 
-def pane_pid(pane_id):
-    text = _tmux("display-message", "-p", "-t", pane_id, "#{pane_pid}").strip()
-    try:
-        return int(text)
-    except ValueError:
-        raise SourceError("tmux: pane is gone") from None
-
-
 def capture(pane_id):
     """The visible screen. -J joins lines the pane wrapped, so a prompt wider than the pane is read
     as the one line it is, and a pattern anchored to its line still finds it."""
@@ -102,14 +94,6 @@ def option(target, name, scope="p", inherited=False):
     none. With `inherited`, the value in effect there, wherever it is set."""
     return _tmux("show-options", f"-{scope}", "-q", "-v", *(["-A"] if inherited else []),
                  "-t", target, name).rstrip("\n")
-
-
-def set_option(target, name, value=None, scope="p"):
-    """Set an option on a pane or window itself, or with `value` None remove it there."""
-    if value is None:
-        _tmux("set-option", f"-{scope}", "-u", "-t", target, name)
-    else:
-        _tmux("set-option", f"-{scope}", "-t", target, name, value)
 
 
 def set_options(changes):
@@ -159,10 +143,14 @@ def popup(command, width=100, height=26, title=""):
         width, height = min(width, int(client[0]) - 2), min(height, int(client[1]) - 2)
     except (SourceError, ValueError, IndexError):
         pass  # keep the wanted size; tmux says so if it cannot fit
-    args = ["display-popup", "-E", "-w", str(max(width, 20)), "-h", str(max(height, 8)), "-b", "rounded"]
-    if title:
-        args += ["-T", literal(title)]
-    _tmux(*args, command, timeout=None)
+    args = ["display-popup", "-E", "-w", str(max(width, 20)), "-h", str(max(height, 8))]
+    styled = args + ["-b", "rounded"] + (["-T", literal(title)] if title else [])
+    try:
+        _tmux(*styled, command, timeout=None)
+    except SourceError as exc:
+        if "flag" not in str(exc) and "usage" not in str(exc):
+            raise
+        _tmux(*args, command, timeout=None)   # tmux 3.2: the same popup, with a plain border and no title
 
 
 def new_window(name, command, cwd=None):
@@ -210,30 +198,3 @@ def ancestors(pid, limit=40):
         chain.append((pid, command))
         pid = parent
     return chain
-
-
-def descendants(root_pid):
-    """Process ids below `root_pid`, read from /proc. Used to find which pane runs a session."""
-    proc = os.environ.get("AGENT_MENU_PROC_ROOT") or "/proc"
-    children = {}
-    try:
-        entries = os.listdir(proc)
-    except OSError:
-        return set()
-    for entry in entries:
-        if not entry.isdigit():
-            continue
-        try:
-            with open(os.path.join(proc, entry, "stat"), encoding="utf-8", errors="replace") as fh:
-                stat = fh.read()
-            parent = int(stat[stat.rindex(")") + 2:].split()[1])
-        except (OSError, ValueError, IndexError):
-            continue
-        children.setdefault(parent, []).append(int(entry))
-    found, stack = set(), [root_pid]
-    while stack:
-        for child in children.get(stack.pop(), []):
-            if child not in found:
-                found.add(child)
-                stack.append(child)
-    return found

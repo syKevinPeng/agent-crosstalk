@@ -90,7 +90,8 @@ class RenderTest(unittest.TestCase):
                 setattr(a, clear, empty)
         self.assertEqual(seen, [("auth", "✗", "X"), ("needs", "!1", "!1"), ("unanswered", "✉2", "+2"),
                                 ("working", "⠋", "*"), ("idle", "✓", ".")])
-        self.assertEqual(menu_render.mark(self.agent("y", state="unknown")), "-")
+        self.assertEqual(menu_render.mark(self.agent("y", state="unknown")), "?")                # alive, no state
+        self.assertEqual(menu_render.mark(self.agent("y", state="unknown", quit=True)), "-")     # quit
         self.assertEqual(menu_render.mark(a := self.agent("z", state="working"), frame=3), "⠸")   # the spinner turns
 
     def test_every_glyph_is_one_cell_wide_and_no_emoji(self):

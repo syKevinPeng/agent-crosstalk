@@ -15,7 +15,7 @@ sys.path.insert(0, str(LIB))
 import menu_highlight  # noqa: E402
 
 CLAUDE_A = "aaaaaaaa-0000-4000-8000-000000000001"
-TINT = {"window-style": "bg=colour236", "window-active-style": "bg=colour236"}
+TINT = {"window-style": "bg=colour236,fg=colour252", "window-active-style": "bg=colour236,fg=colour252"}
 # tmux 3.4 keeps border styles per window, so the window's styles depend on the pane's marker.
 # The active style falls back to tmux 3.4's own default, which is itself a format.
 BORDER = {"pane-border-style": "#{?#{@agent_menu_highlight},fg=brightcyan,default}",
@@ -158,7 +158,7 @@ class HighlightTest(unittest.TestCase):
                                           "AGENT_MENU_HIGHLIGHT_BORDER": "#ff8800"}):
             light = menu_highlight.Highlighter()
             light.show("%7")
-        self.assertEqual(self.tint(7)["window-style"], "bg=colour24")
+        self.assertEqual(self.tint(7)["window-style"], "bg=colour24,fg=colour252")
         self.assertEqual(self.borders()["pane-border-style"], "#{?#{@agent_menu_highlight},fg=##ff8800,default}")
         light.clear()
         with mock.patch.dict(os.environ, {"AGENT_MENU_HIGHLIGHT_BG": "red,blink",
@@ -253,7 +253,7 @@ class SidebarHighlightTest(unittest.TestCase):
             deadline = time.monotonic() + 20
             while "window-style" not in self.m.pane_options(1) and time.monotonic() < deadline:
                 time.sleep(0.05)
-            self.assertEqual(self.m.pane_options(1).get("window-style"), "bg=colour236")
+            self.assertEqual(self.m.pane_options(1).get("window-style"), "bg=colour236,fg=colour252")
             if ending == "q":
                 os.write(fd, b"q")
             else:

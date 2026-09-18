@@ -88,6 +88,7 @@ def read_event(screen):
 def run(screen, key):
     colour = menu_curses.setup(screen)
     glyphs = menu_style.glyphs()
+    dot = glyphs["separator"]
     screen.timeout(RELOAD_MS)
     state, note, stale = menu_popup.State(), "", ""
     loaded = load(key)
@@ -110,7 +111,7 @@ def run(screen, key):
         if small:
             menu_curses.put(screen, 0, 0, "too small")
         else:
-            menu_curses.put(screen, 0, 2, menu_render.fit(menu_detail.title(agent, parent_name), columns - 4,
+            menu_curses.put(screen, 0, 2, menu_render.fit(menu_detail.title(agent, parent_name, glyphs), columns - 4,
                                                           glyphs["ellipsis"]), curses.A_DIM)
             body = menu_detail.body(agent, recent, reply, columns - 4, glyphs)
             room = height - 7                               # title, gap, input, gap, buttons, gap, footer
@@ -138,11 +139,13 @@ def run(screen, key):
                 if not state.typing and not state.text:
                     menu_curses.put(screen, height - 5, 4, "press i to type an instruction", curses.A_DIM)
             if state.confirm:
-                hint = menu_detail.confirm_text(agent) + " y or Enter confirms · any other key cancels"
+                hint = menu_detail.confirm_text(agent) + f" y or Enter confirms{dot}any other key cancels"
             elif state.typing:
-                hint = "Enter send · Esc stop typing"
+                hint = f"Enter send{dot}Esc stop typing"
             else:
-                hint = "Tab next button · Enter press · i instruction · PgUp PgDn scroll · Esc close"
+                # "i instruction" only where there is an instruction line to open.
+                hint = dot.join(["Tab next button", "Enter press"] + (["i instruction"] if "Send" in offered else [])
+                                + ["PgUp PgDn scroll", "Esc close"])
             menu_curses.put(screen, height - 1, 2, menu_render.fit(note or stale or hint, columns - 4, glyphs["ellipsis"]),
                             curses.A_BOLD if note or stale else curses.A_DIM)
             menu_curses.cursor(state.typing)
@@ -191,6 +194,10 @@ def run(screen, key):
                 curses.flushinp()
                 state, note = menu_popup.cancel(state), "cancelled: more keys followed, so that looked pasted"
                 continue
+        # An action can take seconds (retire-peer, claude stop, a delivery check). Say so first.
+        menu_curses.put(screen, height - 1, 2, menu_render.fit("working" + glyphs["ellipsis"], columns - 4,
+                                                               glyphs["ellipsis"]).ljust(columns - 4), curses.A_BOLD)
+        screen.refresh()
         note, succeeded, close = menu_actions.perform(agent, chosen, state.text)
         state = menu_popup.after_action(state, chosen, succeeded)
         curses.flushinp()                                   # the rest of a paste must not run as hotkeys
@@ -214,7 +221,7 @@ def main(argv):
         if not agent:
             print("agent-menu-detail: no such agent" + (f" ({'; '.join(errors)})" if errors else ""), file=sys.stderr)
             return 3
-        print(menu_detail.title(agent, parent_name))
+        print(menu_detail.title(agent, parent_name, menu_style.glyphs()))
         for line, _ in menu_detail.body(agent, recent, reply, 96, menu_style.glyphs()):
             print(line)
         print("buttons: " + ", ".join(menu_detail.buttons(agent)))

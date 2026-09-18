@@ -4,9 +4,13 @@ import os
 import subprocess
 import time
 
-from .base import SourceError, clean, usage_folder
+from .base import SourceAbsent, SourceError, clean, usage_folder
 
 STATES = {"busy": "working", "idle": "idle", "waiting": "needs_owner"}
+# The listing runs off the draw path, so it can wait for a slow start. At 1.5 s a busy machine
+# emptied every Claude row now and then.
+LIST_TIMEOUT = 5.0
+
 # Each `claude` start costs about a tenth of a second of CPU, and the listing is read every two
 # seconds. The `--all` lookup for finished spawned sessions is therefore kept, and redone only when
 # another id goes missing, or after FINISHED_EVERY seconds.
@@ -14,12 +18,16 @@ FINISHED_EVERY = 60.0
 _finished = {"missing": frozenset(), "at": float("-inf"), "sessions": []}
 
 
-def _listing(extra_args=(), timeout=1.5):
+def _listing(extra_args=(), timeout=LIST_TIMEOUT):
     binary = os.environ.get("CLAUDE_BIN") or "claude"
     try:
         out = subprocess.run([binary, "agents", "--json", *extra_args], capture_output=True, text=True,
                              timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except FileNotFoundError:
+        raise SourceAbsent("claude: not installed") from None
+    except subprocess.TimeoutExpired:
+        raise SourceError(f"claude: timed out after {timeout:g} s") from None
+    except OSError as exc:
         raise SourceError(f"claude: {type(exc).__name__}") from None
     if out.returncode != 0:
         raise SourceError(f"claude: exit {out.returncode}")
@@ -27,9 +35,11 @@ def _listing(extra_args=(), timeout=1.5):
         data = json.loads(out.stdout or "[]")
     except ValueError:
         raise SourceError("claude: output is not JSON") from None
+    if not isinstance(data, list):
+        raise SourceError("claude: the listing is not a list")   # a changed format, never an empty tree
     sessions, seen = [], set()
     own = os.path.realpath(usage_folder())
-    for entry in data if isinstance(data, list) else []:
+    for entry in data:
         if not isinstance(entry, dict) or not isinstance(entry.get("sessionId"), str) or entry["sessionId"] in seen:
             continue
         text = {k: entry.get(k) if isinstance(entry.get(k), str) else "" for k in ("id", "name", "cwd")}
@@ -48,7 +58,7 @@ def _listing(extra_args=(), timeout=1.5):
     return sessions
 
 
-def list_sessions(extra_ids=(), timeout=1.5, include_quit=False, errors=None):
+def list_sessions(extra_ids=(), timeout=LIST_TIMEOUT, include_quit=False, errors=None):
     """One dict per live session, plus stopped ones in two cases, each marked `quit`.
 
     What counts as live is the CLI's own active list (`claude agents --json`). A session has stopped

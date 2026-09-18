@@ -231,7 +231,7 @@ def retire(agent):
     return "retired"
 
 
-SHORT_ID = re.compile(r"[0-9a-f]{6,32}")
+SHORT_ID = menu_detail.SHORT_ID
 THREAD_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
