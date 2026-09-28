@@ -1,6 +1,8 @@
-"""Claude Code sessions, from `claude agents --json`."""
+"""Claude Code sessions, from `claude agents --json`, and each one's model from its transcript."""
+import glob
 import json
 import os
+import re
 import subprocess
 import time
 
@@ -16,6 +18,55 @@ LIST_TIMEOUT = 5.0
 # another id goes missing, or after FINISHED_EVERY seconds.
 FINISHED_EVERY = 60.0
 _finished = {"missing": frozenset(), "at": float("-inf"), "sessions": []}
+
+# The listing names no model. Each session's transcript records one on every assistant turn, so the
+# model is the last one there. Only the tail is read, and only when the file has changed.
+TRANSCRIPT_TAIL = 256 * 1024
+_models = {}          # session id -> (transcript path, (size, mtime), model)
+
+
+def _projects_folder():
+    return os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "projects")
+
+
+def short_model(model):
+    """`claude-opus-5-5` -> `opus-5.5`, `claude-haiku-4-5-20251001` -> `haiku-4.5`: it fits the column."""
+    model = re.sub(r"-\d{8}$", "", re.sub(r"^claude-", "", model))
+    return re.sub(r"-(\d+)-(\d+)$", r"-\1.\2", model)
+
+
+def _last_model(path):
+    with open(path, "rb") as fh:
+        fh.seek(max(0, os.fstat(fh.fileno()).st_size - TRANSCRIPT_TAIL))
+        lines = fh.read().split(b"\n")
+    for line in reversed(lines[1:] if len(lines) > 1 else lines):  # the first line may be cut
+        try:
+            entry = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        message = entry.get("message") if isinstance(entry, dict) and entry.get("type") == "assistant" else None
+        model = message.get("model") if isinstance(message, dict) else None
+        if isinstance(model, str) and model and not model.startswith("<"):   # `<synthetic>` is no model
+            return clean(short_model(model))
+    return ""
+
+
+def model_of(session_id):
+    """The model a session last answered with, or "" when its transcript has none or cannot be read."""
+    path, seen, model = _models.get(session_id, (None, None, ""))
+    try:
+        if not path or not os.path.exists(path):
+            found = glob.glob(os.path.join(glob.escape(_projects_folder()), "*", glob.escape(session_id) + ".jsonl"))
+            path = found[0] if found else None
+        if not path:
+            return ""
+        st = os.stat(path)
+        if (st.st_size, st.st_mtime_ns) != seen:
+            seen, model = (st.st_size, st.st_mtime_ns), _last_model(path) or model
+    except OSError:
+        return model
+    _models[session_id] = (path, seen, model)
+    return model
 
 
 def _listing(extra_args=(), timeout=LIST_TIMEOUT):
@@ -77,7 +128,7 @@ def list_sessions(extra_ids=(), timeout=LIST_TIMEOUT, include_quit=False, errors
     With an `errors` list, a failed lookup of stopped sessions adds a line there and the live
     sessions stand, so the reader sees that rows may be missing. Without one it raises, which is
     what an action wants before it touches a session."""
-    live = [dict(s, quit=False) for s in _listing(timeout=timeout)]
+    live = [dict(s, quit=False, model=model_of(s["session_id"])) for s in _listing(timeout=timeout)]
     seen = {s["session_id"] for s in live}
     if include_quit:
         try:

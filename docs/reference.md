@@ -289,7 +289,7 @@ A selection whose row vanishes for one refresh, as when a CLI is slow, stays put
 
 Every mark is one cell wide and none is an emoji, because tmux and the terminal can disagree about an emoji's width. Each state has its own shape, so nothing depends on colour alone, and only three states get a colour. Colours are the terminal's own 16, so your theme decides the contrast. `NO_COLOR` turns colour off and `FORCE_COLOR` turns it back on. `AGENT_MENU_ASCII` set to any value, or a `C` or `POSIX` locale, switches both the sidebar and the popup to plain ASCII. `AGENT_MENU_NO_ANIMATION` set to any value stops the spinner.
 
-In a pane narrower than 27 columns the sidebar is a strip of fold marks, names and the one mark that matters. From 27 to 48 columns it adds the kind and the `ro`/`rw` tag. At 49 and wider it also shows each agent's folder and, where the CLI reports one, its model. The mark at the end of a row is never pushed off the pane.
+In a pane narrower than 27 columns the sidebar is a strip of fold marks, names and the one mark that matters. From 27 to 48 columns it adds the kind and the `ro`/`rw` tag. At 49 and wider it also shows each agent's folder and its model. Codex reports the model. For Claude it is the model of the last answer in the session's transcript, `~/.claude/projects/*/<session id>.jsonl` (under `CLAUDE_CONFIG_DIR` when that is set), shortened to fit: `claude-opus-5-5` shows as `opus-5.5`. A session with no transcript shows none. The mark at the end of a row is never pushed off the pane.
 
 ### Pane highlight
 
@@ -326,7 +326,7 @@ The menu only types into a pane it is sure about.
 
 ### Refreshing and cost
 
-Every two seconds the sidebar reads local state only: `claude agents --json`, the Codex daemon's thread list, tmux, and the two log files. No model is called. Each `claude` start costs about a tenth of a second of CPU, so the sidebar uses a few percent of a core, and more while a popup is open, because the popup rereads the stopped sessions too.
+Every two seconds the sidebar reads local state only: `claude agents --json`, the Codex daemon's thread list, tmux, the two log files, and the last 256 KiB of a Claude transcript that has changed since the last read. No model is called. Each `claude` start costs about a tenth of a second of CPU, so the sidebar uses a few percent of a core, and more while a popup is open, because the popup rereads the stopped sessions too.
 
 ### Environment
 

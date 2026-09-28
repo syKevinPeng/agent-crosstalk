@@ -28,7 +28,7 @@ class Agent:
     short_id: str = ""
     cwd: str = ""
     state: str = "unknown"        # working | idle | stopped | needs_owner | unknown
-    model: str = ""               # only where the CLI reports one: Codex does, Claude does not
+    model: str = ""               # Codex reports it; for Claude it is read from the transcript
     pid: int = 0                  # the session's own process, where the CLI reports one
     quit: bool = False            # stopped (Claude) or archived (Codex); Resume brings it back
     parked: bool = False          # quit and shown apart, under QUIT, rather than in the tree

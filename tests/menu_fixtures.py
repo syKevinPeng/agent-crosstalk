@@ -130,7 +130,8 @@ class Machine:
                         AGENT_MENU_PROC_ROOT=str(self.proc),
                         AGENT_COMMS_LOG=str(self.dir / "messages.jsonl"),
                         AGENT_COMMS_SPAWN_LOG=str(self.dir / "spawned.jsonl"),
-                        AGENT_MENU_ACTIONS_LOG=str(self.dir / "menu-actions.jsonl"))
+                        AGENT_MENU_ACTIONS_LOG=str(self.dir / "menu-actions.jsonl"),
+                        CLAUDE_CONFIG_DIR=str(self.dir / "claude-config"))   # never the real transcripts
         self.write()
 
     def process(self, pid, parent, pgrp=None, tpgid=None):
@@ -164,6 +165,15 @@ class Machine:
                             "pid": pid, "status": status if background else None, "state": state, "cwd": cwd,
                             "kind": "background" if background else "interactive"})
         self.write()
+
+    def transcript(self, session_id, *models, folder="-w"):
+        """A session transcript with one assistant turn per model, after a user line."""
+        path = self.dir / "claude-config" / "projects" / folder / f"{session_id}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [{"type": "user", "message": {"role": "user", "content": "hi"}}]
+        lines += [{"type": "assistant", "message": {"role": "assistant", "model": m, "content": []}} for m in models]
+        path.write_text("".join(json.dumps(line) + "\n" for line in lines))
+        return path
 
     def write(self):
         """A pane is (number, pid, command, title) or, with its flags, (…, in_mode, synchronized)."""

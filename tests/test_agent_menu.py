@@ -70,6 +70,17 @@ class AgentMenuTest(unittest.TestCase):
         self.assertTrue(any(l.startswith("   reviewer") and l.endswith("claude ⠋") for l in lines), lines)
         self.assertTrue(all(len(l) <= 34 for l in lines), lines)
 
+    def test_a_claude_session_shows_the_model_it_last_answered_with(self):
+        self.m.claude_session(CLAUDE_A, "lead", 500)
+        self.m.claude_session(CLAUDE_B, "no-transcript", 501)
+        self.m.transcript(CLAUDE_A, "claude-sonnet-5", "claude-opus-5-5", "<synthetic>")
+        lines = self.tree(columns=62)
+        self.assertTrue(any(l.startswith("   lead ") and "opus-5.5" in l for l in lines), lines)
+        row = next(l for l in lines if l.startswith("   no-transcript"))
+        self.assertNotIn("opus", row)                     # no transcript: the column stays blank
+        self.m.transcript(CLAUDE_A, "claude-haiku-4-5-20251001")   # switched model mid-session
+        self.assertTrue(any(l.startswith("   lead ") and "haiku-4.5" in l for l in self.tree(columns=62)))
+
     def test_a_spawned_agent_hangs_under_its_parent_with_its_access(self):
         self.m.claude_session(CLAUDE_A, "lead session", 500, status="busy")
         self.codex_thread(CODEX_C, "peer-check", status="active")
