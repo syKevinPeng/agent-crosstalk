@@ -527,6 +527,31 @@ class AgentMenuTest(unittest.TestCase):
                                      "access": "read-only", "spawned_by": "claude/owner-main"})
         self.assertTrue(any(l.startswith(" ▾ owner main") for l in self.tree()))    # with its kind, it links
 
+    def test_the_recorded_session_id_beats_a_label_that_names_nobody(self):
+        self.m.claude_session(CLAUDE_A, "rosin", 500)
+        self.codex_thread(CODEX_C, "rosin-rev")
+        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "rosin-rev", "id": CODEX_C,
+                                     "access": "read-only", "spawned_by": "claude/rosin-session",
+                                     "spawned_by_id": CLAUDE_A})
+        lines = self.tree()
+        parent = next(i for i, l in enumerate(lines) if l.startswith(" ▾ rosin"))
+        self.assertTrue(lines[parent + 1].startswith("   └ rosin-rev"), lines)
+
+    def test_an_unknown_or_own_session_id_falls_back_to_the_label(self):
+        self.m.claude_session(CLAUDE_A, "owner main", 500)
+        self.codex_thread(CODEX_P, "kid-one")
+        self.codex_thread(CODEX_C, "kid-two")
+        self.m.log("spawned.jsonl",
+                   {"event": "spawned", "kind": "codex", "name": "kid-one", "id": CODEX_P, "access": "read-only",
+                    "spawned_by": "claude/owner-main", "spawned_by_id": "gone0000-0000-4000-8000-000000000009"},
+                   {"event": "spawned", "kind": "codex", "name": "kid-two", "id": CODEX_C, "access": "read-only",
+                    "spawned_by": "claude/owner-main", "spawned_by_id": CODEX_C})
+        lines = self.tree()
+        parent = next(i for i, l in enumerate(lines) if l.startswith(" ▾ owner main"))
+        children = lines[parent + 1:parent + 3]
+        self.assertTrue(all(l.startswith(("   ├ kid-", "   └ kid-")) for l in children), lines)
+        self.assertEqual(sorted(l.split()[1] for l in children), ["kid-one", "kid-two"], lines)
+
     def test_a_loop_in_the_records_hides_nobody(self):
         self.codex_thread(CODEX_P, "kid-one")
         self.codex_thread(CODEX_C, "kid-two")

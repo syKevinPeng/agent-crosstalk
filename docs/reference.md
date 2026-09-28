@@ -208,7 +208,7 @@ bin/retire-peer [--dry-run] [--expect-stopped | --delete --approval "<where and 
 bin/codex-reply [--all] <codex thread id>
 ```
 
-- **What spawn does:** it creates the agent in `--cwd` (default: the current folder), names it, and appends a line to `log/spawned.jsonl`. The same name may exist on the other side. A duplicate name on the same side is refused with exit 3.
+- **What spawn does:** it creates the agent in `--cwd` (default: the current folder), names it, and appends a line to `log/spawned.jsonl`. That line's `spawned_by_id` is the creating session's own id, read from the variable its CLI sets for every shell command (`CLAUDE_CODE_SESSION_ID` or `CODEX_THREAD_ID`, chosen by the kind in the sender label). The agent menu nests the new agent under that session, and falls back to matching the sender label only when the id is missing or names no running agent. The same name may exist on the other side. A duplicate name on the same side is refused with exit 3.
 - **Where to find it:** a Codex agent shows in `codex agents` once it has taken its first turn. Before that it exists and can be addressed by the id `spawn-peer` prints. A Claude agent shows in `claude agents --json` and in `ListAgents`. For a Claude agent `spawn-peer` prints the short id, which `retire-peer` and `claude attach` take. `send-to-claude` needs the full session UUID from `send-to-claude --list`.
 - **Access is read-only by default.**
   - Codex read-only is enforced by the Codex sandbox (`read-only`).

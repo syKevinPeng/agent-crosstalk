@@ -45,6 +45,7 @@ def spawned():
         if record.get("event") == "spawned":
             agents[agent_id] = {"id": agent_id, "kind": record.get("kind"), "name": clean(record.get("name")),
                                 "cwd": clean(record.get("cwd")), "spawned_by": record.get("spawned_by") or "",
+                                "spawned_by_id": parent if isinstance(parent := record.get("spawned_by_id"), str) else "",
                                 "access": "rw" if record.get("access") == "write" else "ro",
                                 "retired_at": None}
         elif record.get("event") == "resumed" and agent_id in agents:

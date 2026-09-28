@@ -246,6 +246,8 @@ class PeersTest(unittest.TestCase):
                         AGENT_COMMS_SPAWN_LOG=str(self.spawn_log),
                         SPAWN_PEER_POLL_SECONDS="1",
                         AGENT_COMMS_LOG=str(self.tmp / "messages.jsonl"))
+        for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"):   # the test run's own session is not the caller
+            self.env.pop(var, None)
 
     def run_tool(self, tool, *args, **env_extra):
         return subprocess.run([sys.executable, str(tool), *args], env=dict(self.env, **env_extra),
@@ -282,6 +284,22 @@ class PeersTest(unittest.TestCase):
                          ("spawned", "codex", THREAD_ID, "read-only", "claude/t", None))
         self.assertEqual(rec["approvals"], "auto-review")
         self.assertFalse((self.tmp / "codex-argv.txt").exists())  # no first message, so nothing queued
+
+    def test_the_callers_session_id_is_recorded_by_the_senders_kind(self):
+        FakeCodexDaemon(self.sock)
+        both = {"CLAUDE_CODE_SESSION_ID": "c1aude00-0000-4000-8000-000000000001", "CODEX_THREAD_ID": "c0dex000"}
+        for sender, env, expected in (("claude/lead", both, both["CLAUDE_CODE_SESSION_ID"]),
+                                      ("codex/lead", both, "c0dex000"),
+                                      ("lead", both, None),                  # no kind, two candidates: neither
+                                      ("lead", {"CODEX_THREAD_ID": "c0dex000"}, "c0dex000"),
+                                      ("claude/lead", {"CODEX_THREAD_ID": "c0dex000"}, None),
+                                      ("claude/lead", {}, None)):
+            self.spawn_log.unlink(missing_ok=True)
+            proc = self.run_tool(SPAWN, "--cwd", str(self.work), "codex", f"peer-{len(env)}-{len(sender)}",
+                                 sender, **env)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            (rec,) = self.records()
+            self.assertEqual(rec["spawned_by_id"], expected, (sender, env))
 
     def test_write_needs_recorded_approval_and_never_means_full_access(self):
         daemon = FakeCodexDaemon(self.sock)

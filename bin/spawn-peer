@@ -26,6 +26,22 @@ DEFAULT_APPROVALS = "auto-review"
 CLAUDE_READ_ONLY_DENY = "Edit Write NotebookEdit Bash"
 
 
+# The variable each CLI sets for every shell command it runs, holding its own session id. It lets the
+# menu hang a new agent under its creator whatever the sender label says.
+CALLER_ENV = {"claude": "CLAUDE_CODE_SESSION_ID", "codex": "CODEX_THREAD_ID"}
+
+
+def caller_id(sender):
+    """The id of the session running this tool, or None. One CLI started from the other's shell sees
+    both variables, so the sender's kind picks one; with no kind, only a lone variable counts."""
+    found = {kind: os.environ.get(var, "").strip() for kind, var in CALLER_ENV.items()}
+    found = {kind: value for kind, value in found.items() if value}
+    kind = sender.split("/", 1)[0].strip().lower() if "/" in sender else ""
+    if kind in CALLER_ENV:
+        return found.get(kind)
+    return next(iter(found.values())) if len(found) == 1 else None
+
+
 def claude_bin():
     return os.environ.get("CLAUDE_BIN") or "claude"
 
@@ -44,7 +60,7 @@ def claude_sessions():
 def record(args, access, made, **extra):
     line = {"time_utc": spawn_log.now(), "event": "spawned", "kind": args.kind, "name": args.name,
             "id": made["id"], "session_id": made["session_id"], "cwd": args.cwd, "access": access,
-            "spawned_by": args.sender, "approval": args.approval.strip() or None,
+            "spawned_by": args.sender, "spawned_by_id": caller_id(args.sender), "approval": args.approval.strip() or None,
             "approvals": args.approvals}
     line.update(extra)
     try:
@@ -175,6 +191,7 @@ def main(argv):
     if args.dry_run:
         print("DRY RUN: nothing contacted, nothing created, nothing recorded.")
         print(f"Would create {args.kind} agent {args.name!r} in {args.cwd} with {access} access.")
+        print(f"Would record it as spawned by session {caller_id(args.sender) or '(unknown: no session id found)'}.")
         if args.kind == "codex":
             policy = ", ".join(f"{k} {v}" for k, v in CODEX_APPROVALS[args.approvals].items())
             print(f"Approvals: {args.approvals}")

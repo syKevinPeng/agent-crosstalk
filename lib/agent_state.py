@@ -164,8 +164,12 @@ def _link_parents(agents, spawned):
         # A running agent is not retired, whatever the record says: it was brought back, by Resume
         # whose record failed, or by hand with `claude attach` or `codex unarchive`.
         child.retired = record["retired_at"] is not None and child.quit
+        # The creator's session id, recorded by spawn-peer from its CLI's environment, beats any label.
+        # Older records have none, and a session that has since gone falls back to the label as well.
         label = record["spawned_by"]
-        parent = by_short.get(logs_src.label_short_id(label) or "")
+        parent = by_id.get(record["spawned_by_id"])
+        if not parent or parent is child:
+            parent = by_short.get(logs_src.label_short_id(label) or "")
         if not parent and "/" in label:
             # A label is what the creator called itself. Without a short id it must at least name
             # its kind, and exactly one live agent of that kind may carry the name.
