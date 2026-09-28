@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# agent-menu-toggle: open, focus or close the agent sidebar in one tmux window.
+# Not open there: open it on the left edge. Open, from another pane: focus it. Run from the sidebar
+# itself: close it. agent-crosstalk.tmux binds this to a key. See ../docs/reference.md, "Agent menu".
+# Usage: agent-menu-toggle [pane id]   (default: $TMUX_PANE, the pane this runs in)
+set -u
+tmux() { command "${TMUX_BIN:-tmux}" "$@"; }
+BIN=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+MENU=${AGENT_MENU_BIN:-$BIN/agent-menu}
+
+pane=${1:-${TMUX_PANE:-}}
+if [ -z "$pane" ]; then
+    echo "agent-menu-toggle: not inside tmux; pass a pane id" >&2
+    exit 2
+fi
+window=$(tmux display-message -p -t "$pane" '#{window_id}') || exit 4
+width=$(tmux show-option -gqv @agent-menu-width)
+[[ $width =~ ^[1-9][0-9]{0,2}$ ]] || width=34
+
+# The sidebar in this window: a pane this tool tagged, or one started by hand from bin/agent-menu
+# (never agent-menu-detail or another tool's sidebar).
+menu=$(tmux list-panes -t "$window" -F $'#{pane_id}\t#{@agent-menu}\t#{pane_start_command}' |
+       awk -F'\t' '$2 == "1" || $3 ~ /bin\/agent-menu([^-A-Za-z0-9_]|$)/ { print $1; exit }')
+
+if [ -z "$menu" ]; then
+    new=$(tmux split-window -hbf -l "$width" -t "$pane" -P -F '#{pane_id}' "exec '$MENU'") || exit 4
+    tmux set-option -p -t "$new" @agent-menu 1
+elif [ "$menu" = "$pane" ]; then
+    tmux kill-pane -t "$menu"            # the menu ends on SIGHUP and restores the pane highlight
+else
+    tmux select-pane -t "$menu"
+fi

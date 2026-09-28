@@ -234,9 +234,21 @@ bin/codex-reply [--all] <codex thread id>
 ## Agent menu
 
 ```bash
-tmux split-window -hbf -l 34 "$PWD/bin/agent-menu"   # a 34-column sidebar on the left of the current window
+bin/agent-menu-toggle                                 # open, focus or close the sidebar in this tmux window
+tmux split-window -hbf -l 34 "$PWD/bin/agent-menu"   # a 34-column sidebar on the left, by hand
 bin/agent-menu --once --columns 60                    # print the tree once as text and exit
 ```
+
+### Opening it with a key
+
+`run-shell <path>/agent-crosstalk.tmux` in tmux.conf, or the repository listed in TPM, binds `<prefix> O` to `bin/agent-menu-toggle` for the pane the key was pressed in. The toggle looks for the sidebar in that window only. When there is none, it opens one, full height on the left edge, and tags the pane with the pane option `@agent-menu`. When there is one and another pane has the focus, it focuses the sidebar. Pressed from the sidebar, it closes it, and the menu ends on the hangup and restores the pane highlight. A sidebar started by hand counts too: any pane whose start command runs `bin/agent-menu`. A pane of another tool, including `agent-menu-detail`, never does.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `@agent-menu-key` | `O` | the key after the prefix. Set it before the `run-shell` line |
+| `@agent-menu-width` | `34` | columns of a newly opened sidebar, 1 to 999. `w` in the menu still switches layouts |
+
+The toggle exits 2 when it runs outside tmux with no pane id given, and 4 when tmux refuses a command. `TMUX_BIN` selects the tmux binary, and `AGENT_MENU_BIN` the program the sidebar runs, which the tests use.
 
 ### What it shows
 

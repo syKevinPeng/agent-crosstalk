@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `agent-menu-toggle` and `agent-crosstalk.tmux`: `<prefix> O` opens, focuses or closes the sidebar in the current window. The key and width are tmux options.
+- The sidebar shows each Claude session's model, read from its transcript.
+- `spawn-peer` records the creating session's id, and the sidebar nests a peer under it whatever the sender label says.
+
 ## 0.1.0
 
 The first public release.

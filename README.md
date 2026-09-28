@@ -84,7 +84,7 @@ Two of the interfaces used here are not documented as stable: the Codex app-serv
 7. Open the sidebar in your current tmux window.
 
    ```bash
-   tmux split-window -hbf -l 34 "$PWD/bin/agent-menu"
+   bin/agent-menu-toggle
    ```
 
 Logs go to `log/` inside the clone: `messages.jsonl`, `spawned.jsonl` and `menu-actions.jsonl`. They are git-ignored and private to you (0600 files in a 0700 folder).
@@ -113,6 +113,7 @@ Tools are in <path to agent-crosstalk>/bin. Read its README before sending.
 | `retire-peer` | Archives or stops an agent `spawn-peer` created, and nothing else | 0 done, 3 refused |
 | `codex-reply` | Prints a Codex agent's latest answer. Read-only | 0 printed, 5 still running, 6 a newer message is still queued |
 | `agent-menu` | The tmux sidebar. `--once` prints the tree as text | |
+| `agent-menu-toggle` | Opens, focuses or closes the sidebar in the current tmux window | 2 not inside tmux |
 
 Every tool takes `--help`. All exit codes, log fields and environment variables are in the [reference](docs/reference.md).
 
@@ -141,9 +142,13 @@ Receipts close the loop. The receiver cites the `Msg-ID` in its answer, or sends
 
 ## The agent menu
 
+Bind a key to it once, in your tmux configuration:
+
 ```bash
-tmux split-window -hbf -l 34 "$PWD/bin/agent-menu"
+run-shell <path to agent-crosstalk>/agent-crosstalk.tmux    # or list the repository in TPM
 ```
+
+Then `<prefix> O` opens the sidebar on the left of the current window, focuses it if it is already open, and closes it when pressed from the sidebar itself. Set `@agent-menu-key` or `@agent-menu-width` before that line to change the key or the width. Without the binding, `bin/agent-menu-toggle` does the same from a shell, and `tmux split-window -hbf -l 34 "$PWD/bin/agent-menu"` opens one by hand.
 
 Each row is one agent: Claude sessions, Codex threads, and the peers they spawned, nested under their parent. The mark at the end says what matters most, most urgent first.
 
