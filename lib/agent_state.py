@@ -153,15 +153,17 @@ def _mark_spawned(agents, spawned):
             agent.retired = record["retired_at"] is not None
 
 
-def _successor(agents, session_id):
+def _successor(agents, session_id, child):
     """The live Claude session that took over from an ended creator: the one running agent with the
     name that creator last had, in the same folder. None when there is no such agent, or more than one."""
+    live = [a for a in agents if a.kind == "claude" and not a.quit and a is not child]
+    if not live:            # also what a timed-out listing looks like: read no transcripts then
+        return None
     name, cwd = claude_src.identity_of(session_id)
     if not name or not cwd:
         return None
     wanted, folder = logs_src.normalise(name), cwd.rstrip("/")
-    named = [a for a in agents if a.kind == "claude" and not a.quit and a.session_id != session_id
-             and logs_src.normalise(a.name) == wanted and a.cwd.rstrip("/") == folder]
+    named = [a for a in live if logs_src.normalise(a.name) == wanted and a.cwd.rstrip("/") == folder]
     return named[0] if len(named) == 1 else None
 
 
@@ -180,6 +182,9 @@ def _link_parents(agents, spawned):
         # Older records have none, and a session that has since gone falls back to the label as well.
         label = record["spawned_by"]
         parent = by_id.get(record["spawned_by_id"])
+        if not parent and record["spawned_by_id"]:
+            # An ended creator hands its children to the one live session that carries on its name and folder.
+            parent = _successor(agents, record["spawned_by_id"], child)
         if not parent or parent is child:
             parent = by_short.get(logs_src.label_short_id(label) or "")
         if not parent and "/" in label:
@@ -188,8 +193,6 @@ def _link_parents(agents, spawned):
             kind, wanted = label.split("/", 1)[0].lower(), logs_src.normalise(label)
             named = [a for a in agents if a.kind == kind and logs_src.normalise(a.name) == wanted]
             parent = named[0] if len(named) == 1 else None
-        if not parent and record["spawned_by_id"] and not by_id.get(record["spawned_by_id"]):
-            parent = _successor(agents, record["spawned_by_id"])
         if parent and parent is not child:
             child.parent_key = parent.key
     # A forged or mistaken record can make a loop (A made B, B made A). Cut it, so nobody vanishes.

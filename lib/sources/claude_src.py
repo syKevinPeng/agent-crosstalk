@@ -71,39 +71,52 @@ def model_of(session_id):
 
 # A session that has ended leaves its name and folder in its transcript. The menu asks for them when a
 # spawn record names a creator that no longer runs, so a restarted session can take over its children.
-# An ended transcript does not change, so each is read once, and only its title and folder lines are parsed.
-_identities = {}      # session id -> (name, cwd), ("", "") when there is no transcript
+# Only the title and folder lines are parsed, and a transcript is read again only when it has changed.
+_identities = {}      # session id -> ((size, mtime) or None, (name, cwd))
+_SESSION_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+def _read_identity(path):
+    name, cwd = "", ""
+    with open(path, "rb") as fh:
+        for line in fh:
+            wanted = b'"agent-name"' in line or b'"custom-title"' in line
+            if not wanted and (cwd or b'"cwd"' not in line):
+                continue
+            try:
+                entry = json.loads(line)
+            except (ValueError, RecursionError):
+                continue
+            if not isinstance(entry, dict):
+                continue
+            if not cwd and isinstance(entry.get("cwd"), str):
+                cwd = entry["cwd"]
+            title = entry.get("agentName") if entry.get("type") == "agent-name" else \
+                entry.get("customTitle") if entry.get("type") == "custom-title" else None
+            if isinstance(title, str) and title:
+                name = title
+    return clean(name), cwd
 
 
 def identity_of(session_id):
     """The last name and the folder of a Claude session, from its transcript. ("", "") if unknown."""
-    if session_id in _identities:
-        return _identities[session_id]
-    name, cwd = "", ""
-    try:
-        found = glob.glob(os.path.join(glob.escape(_projects_folder()), "*", glob.escape(session_id) + ".jsonl"))
-        if found:
-            with open(found[0], "rb") as fh:
-                for line in fh:
-                    wanted = b'"agent-name"' in line or b'"custom-title"' in line
-                    if not wanted and (cwd or b'"cwd"' not in line):
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except (ValueError, RecursionError):
-                        continue
-                    if not isinstance(entry, dict):
-                        continue
-                    if not cwd and isinstance(entry.get("cwd"), str):
-                        cwd = entry["cwd"]
-                    title = entry.get("agentName") if entry.get("type") == "agent-name" else \
-                        entry.get("customTitle") if entry.get("type") == "custom-title" else None
-                    if isinstance(title, str) and title:
-                        name = title
-    except OSError:
+    if not isinstance(session_id, str) or not _SESSION_ID.fullmatch(session_id):
         return "", ""
-    _identities[session_id] = (clean(name), cwd)
-    return _identities[session_id]
+    seen, identity = _identities.get(session_id, (None, ("", "")))
+    try:
+        found = glob.glob(os.path.join(glob.escape(_projects_folder()), "*", session_id + ".jsonl"))
+        if not found:
+            seen, identity = None, ("", "")
+        else:
+            st = os.stat(found[0])
+            if (st.st_size, st.st_mtime_ns) != seen:
+                seen = (st.st_size, st.st_mtime_ns)       # an unreadable file is not retried until it changes
+                identity = ("", "")
+                identity = _read_identity(found[0])
+    except OSError:
+        pass
+    _identities[session_id] = (seen, identity)
+    return identity
 
 
 def _listing(extra_args=(), timeout=LIST_TIMEOUT):
