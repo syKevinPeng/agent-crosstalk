@@ -96,6 +96,20 @@ def option(target, name, scope="p", inherited=False):
                  "-t", target, name).rstrip("\n")
 
 
+def global_option(name):
+    """The server-wide value of option `name`, "" when it is unset."""
+    return _tmux("show-options", "-g", "-q", "-v", name).rstrip("\n")
+
+
+def set_global_option(name, value):
+    _tmux("set-option", "-g", name, value)
+
+
+def list_keys(table):
+    """`list-keys` for one key table, as tmux prints it."""
+    return _tmux("list-keys", "-T", table)
+
+
 def set_options(changes):
     """Several set_option changes, (target, name, value or None, scope), in one tmux call, so tmux
     redraws once rather than once per change. tmux runs them in order and stops at a failing one."""

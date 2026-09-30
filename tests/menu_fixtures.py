@@ -37,10 +37,11 @@ one() {
   for ((i=0;i<${#args[@]};i++)); do [[ ${args[i]} == -t ]] && target=${args[i+1]}; done
   [[ -n $target && -f "$d/gone-${target#%}" ]] && { echo "can't find pane: $target" >&2; return 1; }
   for ((i=1;i<${#args[@]};i++)); do
-    case ${args[i]} in -p) scope=p ;; -w) scope=w ;; -A) inherited=1 ;; -u) unset_=1 ;; -v) value_only=1 ;;
+    case ${args[i]} in -p) scope=p ;; -w) scope=w ;; -g) scope=g ;; -A) inherited=1 ;; -u) unset_=1 ;; -v) value_only=1 ;;
       -q|-a) ;; -t|-F) i=$((i+1)) ;; *) pos+=("${args[i]}") ;; esac
   done
-  if [[ $scope == w ]]; then file="$d/wopt-${target#@}-${pos[0]}"; else file="$d/popt-${target#%}-${pos[0]}"; fi
+  if [[ $scope == g ]]; then file="$d/gopt-${pos[0]}"
+  elif [[ $scope == w ]]; then file="$d/wopt-${target#@}-${pos[0]}"; else file="$d/popt-${target#%}-${pos[0]}"; fi
   case $1 in
     list-panes) if [[ " $* " == *"@agent_menu_highlight"* ]]; then
                   for f in "$d"/popt-*-@agent_menu_highlight; do
@@ -54,6 +55,7 @@ one() {
                     [[ -f $f ]] || continue
                     n=${f#"$d/wopt-"}; printf '@%s\t%s\n' "${n%%-@agent_menu_highlight_window}" "$(cat "$f")"
                   done ;;
+    list-keys) cat "$d/keys-${args[2]}.txt" 2>/dev/null ;;
     capture-pane) cat "$d/screen-${target#%}.txt" 2>/dev/null ;;
     display-message) if [[ " $* " == *"window_id"* ]]; then win_of "${target#%}"
                      elif [[ -f "$d/pid-${target#%}.txt" ]]; then cat "$d/pid-${target#%}.txt"

@@ -13,6 +13,7 @@ Everything the [README](../README.md) leaves out: each tool's options, exit code
 - [Creating and retiring agents](#creating-and-retiring-agents)
 - [Agent menu](#agent-menu)
 - [Limits](#limits)
+- [Tmux keys](#tmux-keys)
 - [Running Codex without approval prompts](#running-codex-without-approval-prompts)
 - [Shared log pattern](#shared-log-pattern)
 - [Compatibility](#compatibility)
@@ -247,6 +248,7 @@ bin/agent-menu --once --columns 60                    # print the tree once as t
 | --- | --- | --- |
 | `@agent-menu-key` | `O` | the key after the prefix. Set it before the `run-shell` line |
 | `@agent-menu-width` | `34` | columns of a newly opened sidebar, 1 to 999. `w` in the menu still switches layouts |
+| `@agent-menu-keys` | unset | `off` hides the [KEYS block](#tmux-keys). `s` in the sidebar sets it, so the choice holds for every sidebar the server opens later |
 
 The toggle exits 2 when it runs outside tmux with no pane id given, and 4 when tmux refuses a command. `TMUX_BIN` selects the tmux binary, and `AGENT_MENU_BIN` the program the sidebar runs, which the tests use.
 
@@ -281,6 +283,7 @@ When a source cannot be read, a line such as `claude: timed out after 5 s` or `c
 | `a` | show or hide quit agents |
 | `w` | switch the pane between 20 and 62 columns |
 | `u` | reread the rate limits now |
+| `s` | show or hide the KEYS block, and remember it |
 | `?` | help, with the marks |
 | `q` | quit the sidebar |
 
@@ -363,6 +366,27 @@ A block under the tree shows how much of each rate limit is used.
 - **The header says when the reading was taken**, and says `stale` once it is over 45 minutes old.
 - **The wording is read defensively.** Each line is matched on its own, and if nothing matches the block says so instead of inventing a number. Reset times are read by hand, not with the locale's month names.
 - **The block disappears** in a pane narrower than 27 columns and in a short pane, so the tree keeps the space.
+
+## Tmux keys
+
+An optional block above LIMITS reminds you how to split, zoom, and save or restore the layout, with the keys your tmux server really binds.
+
+```
+ KEYS                  prefix C-a
+  split left|right C-F2  C-a %
+  split top/bottom S-F2  C-a "
+  zoom pane        S-F11  C-a z
+  next layout      S-F8
+  save layout      C-a C-s
+  restore layout   C-a C-r
+```
+
+- **Read from tmux, not written down.** The sidebar runs `tmux show-options -gv prefix` and `tmux list-keys` for the `root` and `prefix` tables at start and then once a minute, and names each action by the command bound to it: `split-window` with `-h` (also inside merged flags such as `-bh`) is left|right, any other `split-window` is top/bottom, `resize-pane -Z` zooms, `next-layout` cycles. Plain tmux, byobu's function keys and your own bindings all show up. A menu that merely offers a split, such as the default pane menu on `<prefix> >`, does not count, and neither does a split wrapped in `if-shell` or braces.
+- **Save and restore** are the keys of [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect), found by its `save.sh` and `restore.sh` scripts. Without resurrect, byobu's named layouts are shown instead: its save (`byobu-layout save`, `C-S-F8`) and its restore (`byobu-layout restore`, `M-S-F8`, which opens a new window to pick one). The two stores are separate, so the block never pairs a resurrect key with a byobu one.
+- **Two keys at most per action.** The shortest key pressed alone comes first, then the shortest prefix key, written as you press it: `C-a %`. When the pane is too narrow for both, the prefix key goes.
+- **An action with no binding has no row**, and with none bound, or outside tmux, the block is absent.
+- **`s` shows or hides it** and stores the choice in the global tmux option `@agent-menu-keys` (`on` or `off`). It is shown until you say otherwise.
+- **It gives way first.** It disappears at the same width as LIMITS, and in a short pane it goes before LIMITS does.
 
 ## Running Codex without approval prompts
 

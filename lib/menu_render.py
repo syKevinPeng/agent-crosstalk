@@ -20,11 +20,11 @@ HINT_SHORT = " ⏎ open  u limits  ? help"
 HINT_ASCII = " Enter open  u limits  ? help"
 # Every help line fits the narrowest sidebar (32 cells) and the list fits 12 rows, so nothing is cut.
 HELP = ["KEYS  (mouse: click to open)", "↑ ↓ j k    move", "→ l open   ← h fold or parent",
-        "Space fold  Home End g G jump", "Enter popup   a quit agents", "u limits   w width   q quit",
+        "Space fold  Home End g G jump", "Enter popup   a quit agents", "u limits  s keys  w wide  q quit",
         "MARKS", "✗ login   !n prompt   ✉n unread", "⠋ working   ✓ idle   ? no state", "- stopped or quit",
         "", "Press any key."]
 HELP_ASCII = ["KEYS  (mouse: click to open)", "up down j k  move", "right l open  left h fold/parent",
-              "Space fold  Home End g G jump", "Enter popup   a quit agents", "u limits   w width   q quit",
+              "Space fold  Home End g G jump", "Enter popup   a quit agents", "u limits  s keys  w wide  q quit",
               "MARKS", "X login   !n prompt   +n unread", "* working   . idle   ? no state", "- stopped or quit",
               "", "Press any key."]
 MAX_INDENT = 4
@@ -331,6 +331,32 @@ def limit_rows(limits, columns, glyphs=None, taken_at=None, now=None, errors=())
                     "look": "auth" if limit["percent"] >= LOUD_PERCENT else ""})
     for error in errors:
         out.append({"text": fit(" " + error, columns, glyphs["ellipsis"]), "look": "auth"})
+    return out
+
+
+KEY_LABELS = {"split-side": "split left|right", "split-stacked": "split top/bottom", "zoom": "zoom pane",
+              "next-layout": "next layout", "save-layout": "save layout", "restore-layout": "restore layout"}
+KEY_ORDER = tuple(KEY_LABELS)
+
+
+def key_rows(prefix, keys, columns, glyphs=None):
+    """[{text, look}] for the KEYS block: how to split, zoom, and save or restore the layout, with
+    the keys this tmux server really binds. Empty when nothing is bound or the pane is too narrow."""
+    glyphs = glyphs or menu_style.UNICODE
+    actions = [a for a in KEY_ORDER if keys.get(a)]
+    if not actions or columns < LIMITS_MIN_COLUMNS:
+        return []
+    head, tail = " KEYS", f"prefix {prefix} " if prefix else ""
+    gap = columns - width(head) - width(tail)
+    out = [{"text": glyphs["rule"] * columns, "look": "faint"},
+           {"text": head + " " * gap + tail if gap >= 1 else head, "look": "faint"}]
+    label_width = max(width(KEY_LABELS[a]) for a in actions)
+    for action in actions:
+        lead = f"  {KEY_LABELS[action].ljust(label_width)} "
+        shown = keys[action]
+        while len(shown) > 1 and width(lead + "  ".join(shown)) > columns:
+            shown = shown[:-1]                  # the key pressed alone is kept, the prefix one dropped
+        out.append({"text": fit(lead + "  ".join(shown), columns, glyphs["ellipsis"]), "look": ""})
     return out
 
 

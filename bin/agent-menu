@@ -19,11 +19,13 @@ import menu_curses  # noqa: E402
 import menu_highlight  # noqa: E402
 import menu_render  # noqa: E402
 import menu_style  # noqa: E402
-from sources import limits_src, tmux_src  # noqa: E402
+from sources import keys_src, limits_src, tmux_src  # noqa: E402
 from sources.base import SourceError  # noqa: E402
 
 REFRESH_SECONDS = 2.0
 LIMITS_SECONDS = 15 * 60   # rate limits move slowly, and each Claude reading starts a `claude` process
+KEYS_SECONDS = 60          # key bindings change rarely, and reading them is two quick tmux calls
+KEYS_OPTION = "@agent-menu-keys"   # "off" hides the KEYS block; `s` sets it, so the choice outlives the sidebar
 TICK_MS = 150
 # tmux starts the popup with the server's environment, not this process's. These settings decide what
 # the popup offers (look-only mode above all) and which logs and programs it uses, so the popup's
@@ -53,6 +55,32 @@ class LimitsPoller(threading.Thread):
             self.errors = errors
             self.wake.wait(LIMITS_SECONDS)
             self.wake.clear()
+
+
+class KeysPoller(threading.Thread):
+    """Reads the tmux key bindings for the KEYS block. Off the draw path, like the others, because
+    a tmux call can hang for its whole timeout."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.prefix, self.keys, self.wake = "", {}, threading.Event()
+
+    def run(self):
+        while True:
+            try:
+                self.prefix, self.keys = keys_src.read()
+            except Exception:                    # noqa: BLE001 - not in tmux, a busy server, a binding
+                pass                             # that is not UTF-8: keep the last reading, never end the thread
+            self.wake.wait(KEYS_SECONDS)
+            self.wake.clear()
+
+
+def keys_shown():
+    """Whether the KEYS block starts shown. It is, unless the tmux option says off."""
+    try:
+        return tmux_src.global_option(KEYS_OPTION) != "off"
+    except SourceError:
+        return True
 
 
 class Poller(threading.Thread):
@@ -122,6 +150,9 @@ def _run(screen, highlighter):
     poller.start()
     limits = LimitsPoller()
     limits.start()
+    keys = KeysPoller()
+    keys.start()
+    show_keys = keys_shown()
     selected, collapsed, note, frame, top = "", set(), "", 0, 0
     limits_asked_at = None
     while True:
@@ -146,8 +177,12 @@ def _run(screen, highlighter):
             pinned = rendered[:menu_render.pinned_count(rendered)]
             block = menu_render.limit_rows(limits.limits, columns, glyphs, limits.taken_at,
                                            time.time(), limits.errors)
+            key_block = menu_render.key_rows(keys.prefix, keys.keys, columns, glyphs) if show_keys else []
+            if height - 1 - len(block) - len(key_block) < len(pinned) + 3:
+                key_block = []                   # a short pane gives up the key reminder first
             if height - 1 - len(block) < len(pinned) + 3:
                 block = []                       # a short pane shows agents, not limits
+            block = key_block + block            # the KEYS block sits above LIMITS
             for y, row in enumerate(block):
                 attr = curses.A_DIM if row["look"] == "faint" else (
                     (menu_curses.look("auth", colour) & ~curses.A_REVERSE) | curses.A_BOLD if row["look"] else 0)
@@ -201,6 +236,16 @@ def _run(screen, highlighter):
             poller.show_quit = not poller.show_quit
             note = "showing quit agents" if poller.show_quit else "hiding quit agents"
             poller.wake.set()
+            continue
+        if pressed in (ord("s"), ord("S")):
+            show_keys = not show_keys
+            note = "showing tmux keys" if show_keys else "hiding tmux keys"
+            try:
+                tmux_src.set_global_option(KEYS_OPTION, "on" if show_keys else "off")
+            except SourceError:
+                pass                             # remembered for this sidebar only
+            if show_keys:
+                keys.wake.set()
             continue
         if pressed in (ord("u"), ord("U")):
             note, limits_asked_at = "updating limits…", limits.taken_at

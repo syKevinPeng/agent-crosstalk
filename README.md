@@ -25,7 +25,7 @@ You run a Claude session and a Codex session side by side. You want one to revie
 - **Messages both ways.** `send-to-codex` queues a message for a Codex session and confirms that a turn took it. `send-to-claude` writes one to a Claude session's local inbox socket. Claude to Claude needs no tool: Claude Code's own `SendMessage` does it.
 - **Receipts.** Every message carries a `Msg-ID`. A message counts as received only when a reply cites it, and `log-receipt` records that.
 - **Peer agents.** `spawn-peer` starts a named Claude or Codex agent in a folder, read-only unless you say otherwise, and records it. `retire-peer` archives or stops only agents it created. `codex-reply` reads a Codex agent's latest answer.
-- **The agent menu.** A tmux sidebar with a popup per agent. It highlights the selected agent's pane, and lets you send an instruction, open its pane, quit it or resume it. It also shows your Claude and Codex rate limits.
+- **The agent menu.** A tmux sidebar with a popup per agent. It highlights the selected agent's pane, and lets you send an instruction, open its pane, quit it or resume it. It also shows your Claude and Codex rate limits, and, optionally, the tmux keys for splitting panes and saving or restoring the layout.
 - **Local only.** The tools talk to the two CLIs and their local sockets. They need no API key and run no model of their own. Tokens are spent only when an agent takes a turn.
 
 ## Requirements
@@ -162,7 +162,7 @@ Each row is one agent: Claude sessions, Codex threads, and the peers they spawne
 | `?` | running, but its CLI reports no state |
 | `-` | stopped or quit |
 
-Arrows or `j` `k` move, Enter opens the popup, `a` shows quit agents, `w` widens the pane, `u` rereads the limits, `?` shows every key, and `q` quits. The selected agent's pane gets a faint tint and a bright border, so you can see which pane it is. The popup can open an agent's pane, send it a one-line instruction, quit it with a two-step confirm, or resume it later.
+Arrows or `j` `k` move, Enter opens the popup, `a` shows quit agents, `w` widens the pane, `u` rereads the limits, `s` shows or hides the tmux key reminder, `?` shows every key, and `q` quits. The selected agent's pane gets a faint tint and a bright border, so you can see which pane it is. The popup can open an agent's pane, send it a one-line instruction, quit it with a two-step confirm, or resume it later.
 
 Refreshing reads local state every two seconds and spends no tokens. The full description, including how panes are matched and how pastes are kept from pressing buttons, is in the [reference](docs/reference.md#agent-menu).
 
