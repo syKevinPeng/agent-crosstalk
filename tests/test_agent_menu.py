@@ -1,5 +1,6 @@
 """Black-box tests for bin/agent-menu --once and bin/agent-menu-detail --print."""
 import datetime
+import json
 import importlib.machinery
 import importlib.util
 import os
@@ -18,6 +19,7 @@ from menu_fixtures import BIN, FakeCodexDaemon, Machine
 
 CLAUDE_A = "aaaaaaaa-0000-4000-8000-000000000001"
 CLAUDE_B = "bbbbbbbb-0000-4000-8000-000000000002"
+CLAUDE_C = "cccccccc-0000-4000-8000-000000000003"
 CODEX_P = "0d0d0d0d-0000-7000-8000-00000000000a"
 CODEX_C = "0e0e0e0e-0000-7000-8000-00000000000b"
 
@@ -547,6 +549,52 @@ class AgentMenuTest(unittest.TestCase):
         lines = self.tree()
         parent = next(i for i, l in enumerate(lines) if l.startswith(" ▾ rosin"))
         self.assertTrue(lines[parent + 1].startswith("   └ rosin-rev"), lines)
+
+    def ended_creator(self, session_id, name, cwd):
+        """The transcript a creator left behind when it ended: its folder, then its title."""
+        path = self.m.dir / "claude-config" / "projects" / "-w" / f"{session_id}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [{"type": "user", "cwd": cwd, "sessionId": session_id, "message": {"role": "user", "content": "hi"}},
+                 {"type": "custom-title", "customTitle": "old name", "sessionId": session_id},
+                 {"type": "agent-name", "agentName": name, "sessionId": session_id}]
+        path.write_text("".join(json.dumps(line) + "\n" for line in lines))
+
+    def test_a_child_of_an_ended_creator_hangs_under_its_live_successor(self):
+        gone = "dddddddd-0000-4000-8000-000000000004"
+        self.ended_creator(gone, "rosin", "/w/rosin/")
+        self.m.claude_session(CLAUDE_A, "rosin", 500, cwd="/w/rosin")
+        self.codex_thread(CODEX_C, "rev-one")
+        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "rev-one", "id": CODEX_C,
+                                     "access": "read-only", "spawned_by": "claude/rosin-session",
+                                     "spawned_by_id": gone})
+        lines = self.tree()
+        parent = next(i for i, l in enumerate(lines) if l.startswith(" ▾ rosin"))
+        self.assertTrue(lines[parent + 1].startswith("   └ rev-one"), lines)
+
+    def test_an_ended_creator_hands_over_only_to_one_live_session_in_its_folder(self):
+        gone = "dddddddd-0000-4000-8000-000000000004"
+        self.ended_creator(gone, "rosin", "/w/rosin")
+        self.m.claude_session(CLAUDE_A, "rosin", 500, cwd="/w/elsewhere")      # same name, other folder
+        self.codex_thread(CODEX_C, "rev-one")
+        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "rev-one", "id": CODEX_C,
+                                     "access": "read-only", "spawned_by": "claude/rosin-session",
+                                     "spawned_by_id": gone})
+        self.assertTrue(any(l.startswith("   rev-one") for l in self.tree()))   # top level
+        self.m.claude_session(CLAUDE_B, "rosin", 501, cwd="/w/rosin")
+        self.m.claude_session(CLAUDE_C, "rosin", 502, cwd="/w/rosin")          # two candidates: no guess
+        self.assertTrue(any(l.startswith("   rev-one") for l in self.tree()))
+
+    def test_a_claude_child_named_like_its_ended_creator_is_not_its_own_successor(self):
+        gone = "dddddddd-0000-4000-8000-000000000004"
+        self.ended_creator(gone, "rosin", "/w/rosin")
+        self.m.claude_session(CLAUDE_A, "rosin", 500, cwd="/w/rosin")
+        self.m.claude_session(CLAUDE_B, "rosin", 501, cwd="/w/rosin")         # the child, same name and folder
+        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "claude", "name": "rosin", "id": CLAUDE_B,
+                                     "access": "read-only", "spawned_by": "claude/rosin-session",
+                                     "spawned_by_id": gone})
+        lines = self.tree()
+        parent = next(i for i, l in enumerate(lines) if l.startswith(" ▾ rosin"))
+        self.assertTrue(lines[parent + 1].startswith("   └ rosin"), lines)
 
     def test_an_unknown_or_own_session_id_falls_back_to_the_label(self):
         self.m.claude_session(CLAUDE_A, "owner main", 500)
