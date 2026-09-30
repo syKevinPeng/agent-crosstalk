@@ -560,32 +560,32 @@ class AgentMenuTest(unittest.TestCase):
         path.write_text("".join(json.dumps(line) + "\n" for line in lines))
 
     def test_a_child_of_an_ended_creator_hangs_under_its_live_successor(self):
-        gone = "d1e425ec-b322-409b-819d-a2d0eb369ad4"
+        gone = "dddddddd-0000-4000-8000-000000000004"
         self.ended_creator(gone, "rosin", "/w/rosin/")
         self.m.claude_session(CLAUDE_A, "rosin", 500, cwd="/w/rosin")
-        self.codex_thread(CODEX_C, "x2-fix-review")
-        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "x2-fix-review", "id": CODEX_C,
+        self.codex_thread(CODEX_C, "rev-one")
+        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "rev-one", "id": CODEX_C,
                                      "access": "read-only", "spawned_by": "claude/rosin-session",
                                      "spawned_by_id": gone})
         lines = self.tree()
         parent = next(i for i, l in enumerate(lines) if l.startswith(" ▾ rosin"))
-        self.assertTrue(lines[parent + 1].startswith("   └ x2-fix-review"), lines)
+        self.assertTrue(lines[parent + 1].startswith("   └ rev-one"), lines)
 
     def test_an_ended_creator_hands_over_only_to_one_live_session_in_its_folder(self):
-        gone = "d1e425ec-b322-409b-819d-a2d0eb369ad4"
+        gone = "dddddddd-0000-4000-8000-000000000004"
         self.ended_creator(gone, "rosin", "/w/rosin")
         self.m.claude_session(CLAUDE_A, "rosin", 500, cwd="/w/elsewhere")      # same name, other folder
-        self.codex_thread(CODEX_C, "x2-fix-review")
-        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "x2-fix-review", "id": CODEX_C,
+        self.codex_thread(CODEX_C, "rev-one")
+        self.m.log("spawned.jsonl", {"event": "spawned", "kind": "codex", "name": "rev-one", "id": CODEX_C,
                                      "access": "read-only", "spawned_by": "claude/rosin-session",
                                      "spawned_by_id": gone})
-        self.assertTrue(any(l.startswith("   x2-fix-review") for l in self.tree()))   # top level
+        self.assertTrue(any(l.startswith("   rev-one") for l in self.tree()))   # top level
         self.m.claude_session(CLAUDE_B, "rosin", 501, cwd="/w/rosin")
         self.m.claude_session(CLAUDE_C, "rosin", 502, cwd="/w/rosin")          # two candidates: no guess
-        self.assertTrue(any(l.startswith("   x2-fix-review") for l in self.tree()))
+        self.assertTrue(any(l.startswith("   rev-one") for l in self.tree()))
 
     def test_a_claude_child_named_like_its_ended_creator_is_not_its_own_successor(self):
-        gone = "d1e425ec-b322-409b-819d-a2d0eb369ad4"
+        gone = "dddddddd-0000-4000-8000-000000000004"
         self.ended_creator(gone, "rosin", "/w/rosin")
         self.m.claude_session(CLAUDE_A, "rosin", 500, cwd="/w/rosin")
         self.m.claude_session(CLAUDE_B, "rosin", 501, cwd="/w/rosin")         # the child, same name and folder
