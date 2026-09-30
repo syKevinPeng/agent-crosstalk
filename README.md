@@ -25,7 +25,7 @@ You run a Claude session and a Codex session side by side. You want one to revie
 - **Messages both ways.** `send-to-codex` queues a message for a Codex session and confirms that a turn took it. `send-to-claude` writes one to a Claude session's local inbox socket. Claude to Claude needs no tool: Claude Code's own `SendMessage` does it.
 - **Receipts.** Every message carries a `Msg-ID`. A message counts as received only when a reply cites it, and `log-receipt` records that.
 - **Peer agents.** `spawn-peer` starts a named Claude or Codex agent in a folder, read-only unless you say otherwise, and records it. `retire-peer` archives or stops only agents it created. `codex-reply` reads a Codex agent's latest answer.
-- **The agent menu.** A tmux sidebar with a popup per agent. It highlights the selected agent's pane, and lets you send an instruction, open its pane, quit it or resume it. It also shows your Claude and Codex rate limits, and, optionally, the tmux keys for splitting panes and saving or restoring the layout.
+- **The agent menu.** A tmux sidebar with a popup per agent. It highlights the selected agent's pane, and lets you send an instruction, open its pane, quit it or resume it. It also shows your Claude and Codex rate limits, and, optionally, the tmux keys for opening or closing the sidebar, splitting panes, and saving or restoring the layout.
 - **Local only.** The tools talk to the two CLIs and their local sockets. They need no API key and run no model of their own. Tokens are spent only when an agent takes a turn.
 
 ## Requirements

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- The sidebar can show a KEYS block above LIMITS: the keys to split a pane, zoom it, cycle layouts, and save or restore the layout, read live from `tmux list-keys`, so byobu and tmux-resurrect bindings show as bound. `s` shows or hides it, remembered in `@agent-menu-keys`.
+- The sidebar can show a KEYS block above LIMITS: the keys to open or close the sidebar, split a pane, zoom it, cycle layouts, and save or restore the layout, read live from `tmux list-keys`, so byobu and tmux-resurrect bindings show as bound. `s` shows or hides it, remembered in `@agent-menu-keys`.
 - `agent-menu-toggle` and `agent-crosstalk.tmux`: `<prefix> O` opens, focuses or closes the sidebar in the current window. The key and width are tmux options.
 - The sidebar shows each Claude session's model, read from its transcript.
 - `spawn-peer` records the creating session's id, and the sidebar nests a peer under it whatever the sender label says.

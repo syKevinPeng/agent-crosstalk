@@ -22,7 +22,8 @@ bind-key    -T root         S-F11                  resize-pane -Z
 bind-key    -T root         M-S-F8                 new-window "byobu-layout restore; clear; /bin/bash"
 bind-key    -T root         C-S-F8                 command-prompt -p "Save byobu layout as:" "run-shell \"byobu-layout save '%%'\""
 """
-BYOBU_PREFIX = r"""bind-key    -T prefix       C-r                    run-shell /home/u/.tmux/plugins/tmux-resurrect/scripts/restore.sh
+BYOBU_PREFIX = r"""bind-key    -T prefix       O                      run-shell -b "'/opt/agent-crosstalk/bin/agent-menu-toggle' '#{pane_id}'"
+bind-key    -T prefix       C-r                    run-shell /home/u/.tmux/plugins/tmux-resurrect/scripts/restore.sh
 bind-key    -T prefix       C-s                    run-shell /home/u/.tmux/plugins/tmux-resurrect/scripts/save.sh
 bind-key    -T prefix       \"                     split-window
 bind-key    -T prefix       \%                     split-window -h
@@ -43,7 +44,7 @@ bind-key    -T prefix       z                      resize-pane -Z
 class ParseTest(unittest.TestCase):
     def test_byobu_with_resurrect(self):
         keys = keys_src.parse(BYOBU_ROOT + BYOBU_PREFIX, "C-a")
-        self.assertEqual(keys, {"split-side": ["C-F2", "C-a %"], "split-stacked": ["S-F2", 'C-a "'],
+        self.assertEqual(keys, {"sidebar": ["C-a O"], "split-side": ["C-F2", "C-a %"], "split-stacked": ["S-F2", 'C-a "'],
                                 "zoom": ["S-F11", "C-a z"], "next-layout": ["S-F8"],
                                 "save-layout": ["C-a C-s"], "restore-layout": ["C-a C-r"]})
 
@@ -111,19 +112,20 @@ class KeyRowsTest(unittest.TestCase):
     def test_block_fits_every_width_it_draws_at(self):
         for columns in (26, 30, 34, 48, 62):
             rows = menu_render.key_rows("C-a", self.KEYS, columns)
-            self.assertEqual(len(rows), 2 + 6)
+            self.assertEqual(len(rows), 2 + 7)
             for row in rows:
                 self.assertLessEqual(menu_render.width(row["text"]), columns, (columns, row["text"]))
 
     def test_layout_at_the_default_width(self):
         texts = [r["text"] for r in menu_render.key_rows("C-a", self.KEYS, 34)]
         self.assertTrue(texts[1].startswith(" KEYS") and texts[1].endswith("prefix C-a "))
-        self.assertIn("  split left|right C-F2  C-a %", texts)
-        self.assertIn("  restore layout   C-a C-r", texts)
+        self.assertEqual(texts[2], "  open/close sidebar C-a O")
+        self.assertIn("  split left|right   C-F2  C-a %", texts)
+        self.assertIn("  restore layout     C-a C-r", texts)
 
     def test_narrow_pane_keeps_the_key_pressed_alone(self):
         texts = [r["text"] for r in menu_render.key_rows("C-a", self.KEYS, 28)]
-        self.assertIn("  split left|right C-F2", texts)
+        self.assertIn("  split left|right   C-F2", texts)
 
     def test_hidden_when_too_narrow_or_nothing_bound(self):
         self.assertEqual(menu_render.key_rows("C-a", self.KEYS, 25), [])

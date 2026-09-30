@@ -9,7 +9,7 @@ import re
 from . import tmux_src
 
 # The actions the block reminds you of, in the order it lists them.
-ACTIONS = ("split-side", "split-stacked", "zoom", "next-layout", "save-layout", "restore-layout")
+ACTIONS = ("sidebar", "split-side", "split-stacked", "zoom", "next-layout", "save-layout", "restore-layout")
 BINDING = re.compile(r"^bind-key\s+(?:-r\s+)?-T\s+(\S+)\s+(\S+)\s+(.+)$")
 # One command of several joined with `\;`, as list-keys prints them.
 SEPARATOR = re.compile(r"\s+\\;\s+")
@@ -31,6 +31,8 @@ def action_of(command):
         if not words:
             continue
         verb, flags = words[0], words[1:]
+        if verb == "run-shell" and "agent-menu-toggle" in part:
+            return "sidebar"
         if verb == "split-window":
             # list-keys merges flags that take no value, so `-h -b` comes back as `-bh`.
             side = any(f.startswith("-") and not f.startswith("--") and "h" in f[1:] for f in flags)

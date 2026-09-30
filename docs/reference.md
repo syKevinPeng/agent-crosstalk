@@ -369,19 +369,20 @@ A block under the tree shows how much of each rate limit is used.
 
 ## Tmux keys
 
-An optional block above LIMITS reminds you how to split, zoom, and save or restore the layout, with the keys your tmux server really binds.
+An optional block above LIMITS reminds you how to open or close this sidebar, split, zoom, and save or restore the layout, with the keys your tmux server really binds.
 
 ```
  KEYS                  prefix C-a
-  split left|right C-F2  C-a %
-  split top/bottom S-F2  C-a "
-  zoom pane        S-F11  C-a z
-  next layout      S-F8
-  save layout      C-a C-s
-  restore layout   C-a C-r
+  open/close sidebar C-a O
+  split left|right   C-F2  C-a %
+  split top/bottom   S-F2  C-a "
+  zoom pane          S-F11  C-a z
+  next layout        S-F8
+  save layout        C-a C-s
+  restore layout     C-a C-r
 ```
 
-- **Read from tmux, not written down.** The sidebar runs `tmux show-options -gv prefix` and `tmux list-keys` for the `root` and `prefix` tables at start and then once a minute, and names each action by the command bound to it: `split-window` with `-h` (also inside merged flags such as `-bh`) is left|right, any other `split-window` is top/bottom, `resize-pane -Z` zooms, `next-layout` cycles. Plain tmux, byobu's function keys and your own bindings all show up. A menu that merely offers a split, such as the default pane menu on `<prefix> >`, does not count, and neither does a split wrapped in `if-shell` or braces.
+- **Read from tmux, not written down.** The sidebar runs `tmux show-options -gv prefix` and `tmux list-keys` for the `root` and `prefix` tables at start and then once a minute, and names each action by the command bound to it: a `run-shell` of `agent-menu-toggle` opens or closes the sidebar (so `@agent-menu-key` shows as set), `split-window` with `-h` (also inside merged flags such as `-bh`) is left|right, any other `split-window` is top/bottom, `resize-pane -Z` zooms, `next-layout` cycles. Plain tmux, byobu's function keys and your own bindings all show up. A menu that merely offers a split, such as the default pane menu on `<prefix> >`, does not count, and neither does a split wrapped in `if-shell` or braces.
 - **Save and restore** are the keys of [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect), found by its `save.sh` and `restore.sh` scripts. Without resurrect, byobu's named layouts are shown instead: its save (`byobu-layout save`, `C-S-F8`) and its restore (`byobu-layout restore`, `M-S-F8`, which opens a new window to pick one). The two stores are separate, so the block never pairs a resurrect key with a byobu one.
 - **Two keys at most per action.** The shortest key pressed alone comes first, then the shortest prefix key, written as you press it: `C-a %`. When the pane is too narrow for both, the prefix key goes.
 - **An action with no binding has no row**, and with none bound, or outside tmux, the block is absent.

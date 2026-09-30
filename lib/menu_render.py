@@ -334,7 +334,7 @@ def limit_rows(limits, columns, glyphs=None, taken_at=None, now=None, errors=())
     return out
 
 
-KEY_LABELS = {"split-side": "split left|right", "split-stacked": "split top/bottom", "zoom": "zoom pane",
+KEY_LABELS = {"sidebar": "open/close sidebar", "split-side": "split left|right", "split-stacked": "split top/bottom", "zoom": "zoom pane",
               "next-layout": "next layout", "save-layout": "save layout", "restore-layout": "restore layout"}
 KEY_ORDER = tuple(KEY_LABELS)
 
