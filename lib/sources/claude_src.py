@@ -69,6 +69,43 @@ def model_of(session_id):
     return model
 
 
+# A session that has ended leaves its name and folder in its transcript. The menu asks for them when a
+# spawn record names a creator that no longer runs, so a restarted session can take over its children.
+# An ended transcript does not change, so each is read once, and only its title and folder lines are parsed.
+_identities = {}      # session id -> (name, cwd), ("", "") when there is no transcript
+
+
+def identity_of(session_id):
+    """The last name and the folder of a Claude session, from its transcript. ("", "") if unknown."""
+    if session_id in _identities:
+        return _identities[session_id]
+    name, cwd = "", ""
+    try:
+        found = glob.glob(os.path.join(glob.escape(_projects_folder()), "*", glob.escape(session_id) + ".jsonl"))
+        if found:
+            with open(found[0], "rb") as fh:
+                for line in fh:
+                    wanted = b'"agent-name"' in line or b'"custom-title"' in line
+                    if not wanted and (cwd or b'"cwd"' not in line):
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except (ValueError, RecursionError):
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    if not cwd and isinstance(entry.get("cwd"), str):
+                        cwd = entry["cwd"]
+                    title = entry.get("agentName") if entry.get("type") == "agent-name" else \
+                        entry.get("customTitle") if entry.get("type") == "custom-title" else None
+                    if isinstance(title, str) and title:
+                        name = title
+    except OSError:
+        return "", ""
+    _identities[session_id] = (clean(name), cwd)
+    return _identities[session_id]
+
+
 def _listing(extra_args=(), timeout=LIST_TIMEOUT):
     binary = os.environ.get("CLAUDE_BIN") or "claude"
     try:

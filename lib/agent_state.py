@@ -153,6 +153,18 @@ def _mark_spawned(agents, spawned):
             agent.retired = record["retired_at"] is not None
 
 
+def _successor(agents, session_id):
+    """The live Claude session that took over from an ended creator: the one running agent with the
+    name that creator last had, in the same folder. None when there is no such agent, or more than one."""
+    name, cwd = claude_src.identity_of(session_id)
+    if not name or not cwd:
+        return None
+    wanted, folder = logs_src.normalise(name), cwd.rstrip("/")
+    named = [a for a in agents if a.kind == "claude" and not a.quit and a.session_id != session_id
+             and logs_src.normalise(a.name) == wanted and a.cwd.rstrip("/") == folder]
+    return named[0] if len(named) == 1 else None
+
+
 def _link_parents(agents, spawned):
     by_id = {a.session_id: a for a in agents}
     by_short = {a.short_id: a for a in agents if a.short_id}
@@ -176,6 +188,8 @@ def _link_parents(agents, spawned):
             kind, wanted = label.split("/", 1)[0].lower(), logs_src.normalise(label)
             named = [a for a in agents if a.kind == kind and logs_src.normalise(a.name) == wanted]
             parent = named[0] if len(named) == 1 else None
+        if not parent and record["spawned_by_id"] and not by_id.get(record["spawned_by_id"]):
+            parent = _successor(agents, record["spawned_by_id"])
         if parent and parent is not child:
             child.parent_key = parent.key
     # A forged or mistaken record can make a loop (A made B, B made A). Cut it, so nobody vanishes.
