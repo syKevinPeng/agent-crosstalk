@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- LIMITS: when the Codex daemon has not run a turn itself it answers 0 % with a reset one full window from now. The sidebar now shows the last reading Codex logged in its session files instead, while that window is still open.
 - The sidebar can show a KEYS block above LIMITS: the keys to open or close the sidebar, split a pane, zoom it, cycle layouts, and save or restore the layout, read live from `tmux list-keys`, so byobu and tmux-resurrect bindings show as bound. `s` shows or hides it, remembered in `@agent-menu-keys`.
 - `agent-menu-toggle` and `agent-crosstalk.tmux`: `<prefix> O` opens, focuses or closes the sidebar in the current window. The key and width are tmux options.
 - The sidebar shows each Claude session's model, read from its transcript.

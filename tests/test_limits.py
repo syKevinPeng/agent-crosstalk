@@ -1,5 +1,6 @@
 """Tests for the rate-limit source and the LIMITS block."""
 import datetime
+import json
 import os
 import sys
 import tempfile
@@ -66,6 +67,41 @@ class LimitsSourceTest(unittest.TestCase):
         daemon.account = {"rateLimits": None, "rateLimitsByLimitId": {}}
         with self.assertRaises(SourceError):
             limits_src.codex_limits(now=NOW)
+
+    def _log_turn(self, used, resets_at, name="rollout-2026-09-17T10-00-00-x.jsonl"):
+        folder = os.path.join(os.environ["CODEX_HOME"], "archived_sessions")
+        os.makedirs(folder, exist_ok=True)
+        event = {"timestamp": "2026-09-17T20:00:00.000Z", "type": "event_msg", "payload": {
+            "type": "token_count", "rate_limits": {"limit_id": "codex", "primary": {
+                "used_percent": used, "window_minutes": 10080, "resets_at": resets_at}, "secondary": None}}}
+        with open(os.path.join(folder, name), "w") as fh:
+            fh.write('{"type": "session_meta"}\n' + json.dumps(event) + "\n")
+
+    def _placeholder_daemon(self):
+        FakeCodexDaemon(self.m.sock).account = {"rateLimitsByLimitId": {"codex": {
+            "primary": {"usedPercent": 0, "windowDurationMins": 10080, "resetsAt": NOW.timestamp() + 7 * 86400}}}}
+
+    def test_a_placeholder_from_the_daemon_gives_way_to_the_last_logged_turn(self):
+        os.environ["CODEX_HOME"] = str(self.m.dir / "codex-home")
+        self._placeholder_daemon()
+        self._log_turn(15.0, NOW.timestamp() + 4 * 86400)
+        (limit,) = limits_src.codex_limits(now=NOW)
+        self.assertEqual((limit["percent"], menu_render.short_reset(limit["resets_in"])), (15, "4d"))
+
+    def test_a_logged_window_that_has_reset_leaves_the_daemon_answer(self):
+        os.environ["CODEX_HOME"] = str(self.m.dir / "codex-home")
+        self._placeholder_daemon()
+        self._log_turn(15.0, NOW.timestamp() - 60)                           # that week is over
+        (limit,) = limits_src.codex_limits(now=NOW)
+        self.assertEqual(limit["percent"], 0)
+
+    def test_a_real_daemon_reading_is_never_replaced(self):
+        os.environ["CODEX_HOME"] = str(self.m.dir / "codex-home")
+        FakeCodexDaemon(self.m.sock).account = {"rateLimitsByLimitId": {"codex": {
+            "primary": {"usedPercent": 0, "windowDurationMins": 10080, "resetsAt": NOW.timestamp() + 2 * 86400}}}}
+        self._log_turn(15.0, NOW.timestamp() + 4 * 86400)
+        (limit,) = limits_src.codex_limits(now=NOW)
+        self.assertEqual(limit["percent"], 0)                                # a started window at 0 % is real
 
     def test_one_source_failing_never_hides_the_other(self):
         FakeCodexDaemon(self.m.sock).account = {"rateLimitsByLimitId": {"codex": {
