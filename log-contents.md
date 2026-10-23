@@ -1,6 +1,6 @@
 # `log/` contents (tracked manifest)
 
-**Cannot be rebuilt.** `log/` is the only record of the messages, receipts and spawned agents. It is git-ignored and
+**Cannot be rebuilt.** `log/` is the only record of the messages, receipts and spawned agents that the tools logged here. It is git-ignored and
 kept private: the folder is 0700 and the JSONL logs are 0600 (the three dated Markdown files are 0664). It is a
 backup target.
 
@@ -18,3 +18,8 @@ As of 2026-10-21 (a snapshot; the logs keep growing):
 - **Depends on it:** the receipt protocol (a message without a receipt counts as undelivered) and every report that
   cites a Msg-ID.
 - **Backup:** no nightly backup covers this repository's ignored files.
+
+**Logs kept elsewhere.** `AGENT_COMMS_LOG`, `AGENT_COMMS_SPAWN_LOG`, `AGENT_MENU_ACTIONS_LOG` and
+`AGENT_MENU_USAGE_CWD` move these files out of `log/`. A machine that sets them keeps its own record there,
+which then needs its own manifest and backup, kept outside this repository. A receipt is always logged in
+the log that holds the send.

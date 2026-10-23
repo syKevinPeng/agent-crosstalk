@@ -116,10 +116,10 @@ A send that worked is not a message that arrived. `codex queue` reports `queued`
     | $all[] | select(.channel != "receipt" and .msg_id != null and .result != "error")
     | select((.first_line // "") | startswith("ACK ") | not)
     | select(.msg_id as $id | $got | index($id) | not)
-    | [.time_utc, .channel, .thread, .msg_id, .first_line] | @tsv' log/messages.jsonl
+    | [.time_utc, .channel, .thread, .msg_id, .first_line] | @tsv' "${AGENT_COMMS_LOG:-log/messages.jsonl}"
   ```
 
-  The query reads the log line by line, so one damaged line cannot hide the rest. It skips `ACK` lines, which never get a receipt of their own.
+  It reads the log the tools write, `AGENT_COMMS_LOG` when that is set. The query reads the log line by line, so one damaged line cannot hide the rest. It skips `ACK` lines, which never get a receipt of their own.
 
 Claude to Claude `SendMessage` carries no `Msg-ID`. There, the reply itself is the receipt.
 
