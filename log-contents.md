@@ -1,5 +1,14 @@
 # `log/` contents (tracked manifest)
 
+**Since 2026-10-23 the record is kept on the lab workstation**, where all agent messaging now runs (workspace
+`AGENTS.md` rule 8). Its tools write `~/.local/state/agent-comms/` there, chosen by `AGENT_COMMS_LOG`,
+`AGENT_COMMS_SPAWN_LOG`, `AGENT_MENU_ACTIONS_LOG` and `AGENT_MENU_USAGE_CWD` (set in that machine's shell
+profile, its byobu tmux config and its Codex daemon's unit). That folder holds the same files as `log/` below,
+has the same permissions, and the same rules apply: it **cannot be rebuilt**, it is a backup target, and no
+nightly backup covers it yet. `log/` in this repository is the record up to 2026-10-23. It still gains lines
+only for Codex threads that began before that date, whose receipts and retirements are logged where their
+sends were. A receipt is always logged on the machine that logged the send.
+
 **Cannot be rebuilt.** `log/` is the only record of the messages, receipts and spawned agents. It is git-ignored and
 kept private: the folder is 0700 and the JSONL logs are 0600 (the three dated Markdown files are 0664). It is a
 backup target.
